@@ -1,0 +1,16 @@
+@import "tailwindcss";
+
+@theme {
+  --color-maroon-50: #fbeced;
+  --color-maroon-100: #f4d0d4;
+  --color-maroon-600: #7a1e2b;
+  --color-maroon-700: #691a25;
+  --color-maroon-800: #58151f;
+
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI",
+    Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+body {
+  @apply bg-gray-50 font-sans text-gray-900;
+}

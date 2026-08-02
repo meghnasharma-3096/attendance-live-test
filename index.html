@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Hardware Capability Test — Attendance System</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 700px; margin: 40px auto; padding: 0 20px; line-height: 1.5; }
+  h1 { font-size: 1.4em; }
+  .test-block { border: 1px solid #ddd; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+  button { padding: 10px 18px; font-size: 1em; cursor: pointer; border-radius: 6px; border: 1px solid #333; background: #f5f5f5; }
+  button:hover { background: #eee; }
+  .result { margin-top: 12px; padding: 10px; border-radius: 6px; font-family: monospace; font-size: 0.9em; white-space: pre-wrap; }
+  .pass { background: #e6f4ea; border: 1px solid #34a853; }
+  .fail { background: #fce8e6; border: 1px solid #ea4335; }
+  .pending { background: #fef7e0; border: 1px solid #f9ab00; }
+</style>
+</head>
+<body>
+
+<h1>Attendance System — Hardware Capability Test</h1>
+<p>Run this on the exact laptop and browser you'll use for tomorrow's demo. This checks nothing else — it only tells you whether Geolocation and Web Bluetooth are usable here, so we know which build path to take.</p>
+
+<div class="test-block">
+  <h2>1. Secure Context Check</h2>
+  <p>Both Geolocation and Web Bluetooth require a "secure context" (HTTPS or localhost). This checks whether the page is currently loaded in one.</p>
+  <div id="secure-result" class="result pending">Checking...</div>
+</div>
+
+<div class="test-block">
+  <h2>2. Geolocation Test</h2>
+  <p>Click to request GPS/location permission and read your current coordinates.</p>
+  <button onclick="testGeolocation()">Test Geolocation</button>
+  <div id="geo-result" class="result pending" style="display:none;"></div>
+</div>
+
+<div class="test-block">
+  <h2>3. Web Bluetooth Test</h2>
+  <p>Click to check if the browser exposes the Bluetooth API at all, then try to open the device picker (this proves the OS Bluetooth stack and browser are actually talking to each other, not just that the API exists).</p>
+  <button onclick="testBluetoothAPI()">Check Bluetooth API Exists</button>
+  <button onclick="testBluetoothScan()">Try Opening Device Picker</button>
+  <div id="bt-result" class="result pending" style="display:none;"></div>
+</div>
+
+<script>
+  // 1. Secure context check
+  const secureDiv = document.getElementById('secure-result');
+  if (window.isSecureContext) {
+    secureDiv.textContent = "PASS — secure context confirmed (" + location.protocol + "//" + location.host + ")";
+    secureDiv.className = "result pass";
+  } else {
+    secureDiv.textContent = "FAIL — not a secure context. Geolocation/Bluetooth will likely be blocked.\nServe this file via 'localhost' (e.g. python -m http.server) rather than opening it directly as a file:// URL.";
+    secureDiv.className = "result fail";
+  }
+
+  function testGeolocation() {
+    const div = document.getElementById('geo-result');
+    div.style.display = 'block';
+    div.className = "result pending";
+    div.textContent = "Requesting location permission...";
+
+    if (!('geolocation' in navigator)) {
+      div.textContent = "FAIL — navigator.geolocation is not available in this browser at all.";
+      div.className = "result fail";
+      return;
+    }
+
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        div.textContent = "PASS — Location retrieved:\nLatitude: " + pos.coords.latitude +
+          "\nLongitude: " + pos.coords.longitude +
+          "\nAccuracy: ±" + pos.coords.accuracy + " meters";
+        div.className = "result pass";
+      },
+      (err) => {
+        div.textContent = "FAIL — " + err.message + " (code " + err.code + ")\nCommon cause: permission denied, or blocked by browser/OS location settings.";
+        div.className = "result fail";
+      },
+      { enableHighAccuracy: true, timeout: 10000 }
+    );
+  }
+
+  function testBluetoothAPI() {
+    const div = document.getElementById('bt-result');
+    div.style.display = 'block';
+    if ('bluetooth' in navigator) {
+      div.textContent = "PASS — navigator.bluetooth exists in this browser.";
+      div.className = "result pass";
+    } else {
+      div.textContent = "FAIL — navigator.bluetooth is not available. Web Bluetooth is not supported here.\nThis would rule out the in-browser Bluetooth beacon check as a build path tonight.";
+      div.className = "result fail";
+    }
+  }
+
+  async function testBluetoothScan() {
+    const div = document.getElementById('bt-result');
+    div.style.display = 'block';
+    div.className = "result pending";
+    div.textContent = "Opening device picker (requires a user click — this counts as one)...";
+
+    if (!('bluetooth' in navigator)) {
+      div.textContent = "FAIL — navigator.bluetooth is not available at all.";
+      div.className = "result fail";
+      return;
+    }
+
+    try {
+      // acceptAllDevices just proves the picker opens and the OS Bluetooth stack responds.
+      // We are not pairing to anything real here — just confirming the pipe works.
+      const device = await navigator.bluetooth.requestDevice({
+        acceptAllDevices: true
+      });
+      div.textContent = "PASS — Device picker opened and returned a device:\nName: " + (device.name || "(unnamed)") +
+        "\nID: " + device.id +
+        "\n\nThis confirms Edge + Windows Bluetooth stack are cooperating. We can build the beacon-detection logic on this.";
+      div.className = "result pass";
+    } catch (err) {
+      div.textContent = "FAIL/CANCELLED — " + err.message +
+        "\n\nIf you cancelled the picker, that's fine — that's not a failure, just re-run and select a device this time. " +
+        "If it errored immediately without showing a picker, that likely means Bluetooth is off on this laptop, or blocked by policy.";
+      div.className = "result fail";
+    }
+  }
+</script>
+
+</body>
+</html>

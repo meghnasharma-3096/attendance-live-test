@@ -3,6 +3,7 @@ import Login from './pages/Login.jsx'
 import Student from './pages/Student.jsx'
 import CourseDetail from './pages/CourseDetail.jsx'
 import Professor from './pages/Professor.jsx'
+import ProfessorLive from './pages/ProfessorLive.jsx'
 import Admin from './pages/Admin.jsx'
 import Scan from './pages/Scan.jsx'
 import Anomalies from './pages/Anomalies.jsx'
@@ -35,6 +36,14 @@ export default function App() {
         element={
           <ProtectedRoute role="professor">
             <Professor />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/professor/live/:sessionId"
+        element={
+          <ProtectedRoute role="professor">
+            <ProfessorLive />
           </ProtectedRoute>
         }
       />

@@ -1,235 +1,54 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { QRCodeSVG } from 'qrcode.react'
-import { useAuth } from '../context/AuthContext.jsx'
+import { CalendarDays } from 'lucide-react'
 import { supabase } from '../lib/supabaseClient.js'
-import { formatDateIST, getTodayISTDateString } from '../lib/dateFormat.js'
-import SignOutButton from '../components/SignOutButton.jsx'
+import { getTodayISTDayAbbrev } from '../lib/dateFormat.js'
+import UserMenu from '../components/UserMenu.jsx'
 
-const SESSION_NUMBER = 16
+const PROFESSOR_IDENTIFIER = 'prof_dtai'
+const DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 
-function generateToken() {
-  return Math.random().toString(36).substring(2, 10)
-}
-
-function buildScanUrl(sessionId, token) {
-  return `${window.location.origin}${window.location.pathname}#/scan?session=${sessionId}&token=${token}`
-}
-
-function displaySessionDate(session) {
-  const dateString = session.status === 'not_started' ? getTodayISTDateString() : session.session_date
-  return formatDateIST(dateString)
-}
-
-function getCurrentPosition() {
-  return new Promise((resolve, reject) => {
-    if (!navigator.geolocation) {
-      reject(new Error('Geolocation is not supported by this browser.'))
-      return
-    }
-    navigator.geolocation.getCurrentPosition(resolve, reject, {
-      enableHighAccuracy: true,
-      timeout: 10000,
-    })
-  })
+function formatTimeRange(startTime, endTime) {
+  return `${startTime.slice(0, 5)}–${endTime.slice(0, 5)}`
 }
 
 export default function Professor() {
-  const { user } = useAuth()
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
-  const [session, setSession] = useState(null)
-  const [course, setCourse] = useState(null)
-  const [starting, setStarting] = useState(false)
-  const [startError, setStartError] = useState('')
-  const [ending, setEnding] = useState(false)
-  const [endError, setEndError] = useState('')
-  const [durationInput, setDurationInput] = useState('')
-  const [token, setToken] = useState('')
-  const [countdown, setCountdown] = useState(0)
-  const [presentCount, setPresentCount] = useState(0)
-  const [manuallyMarked, setManuallyMarked] = useState([])
+  const [slots, setSlots] = useState([])
+  const [toast, setToast] = useState('')
+
+  const today = getTodayISTDayAbbrev()
 
   useEffect(() => {
-    async function loadSession() {
+    async function loadSlots() {
       setLoading(true)
       setError('')
 
-      const { data: courseRow, error: courseError } = await supabase
-        .from('courses')
-        .select('id, default_qr_duration_seconds')
-        .limit(1)
-        .maybeSingle()
+      const { data, error: slotsError } = await supabase
+        .from('timetable_slots')
+        .select('id, day_of_week, start_time, end_time, course_name, section, room, is_functional, linked_session_id')
+        .eq('professor_identifier', PROFESSOR_IDENTIFIER)
+        .order('start_time')
 
-      if (courseError || !courseRow) {
-        setError(courseError?.message ?? 'No course found')
+      if (slotsError) {
+        setError(slotsError.message)
         setLoading(false)
         return
       }
 
-      const { data: sessionRow, error: sessionError } = await supabase
-        .from('sessions')
-        .select('id, session_number, session_date, status, qr_duration_seconds')
-        .eq('course_id', courseRow.id)
-        .eq('session_number', SESSION_NUMBER)
-        .maybeSingle()
-
-      if (sessionError || !sessionRow) {
-        setError(sessionError?.message ?? `Session ${SESSION_NUMBER} not found`)
-        setLoading(false)
-        return
-      }
-
-      setCourse(courseRow)
-      setSession(sessionRow)
-      setDurationInput(String(sessionRow.qr_duration_seconds ?? courseRow.default_qr_duration_seconds))
+      setSlots(data ?? [])
       setLoading(false)
     }
 
-    loadSession()
+    loadSlots()
   }, [])
 
   useEffect(() => {
-    if (session?.status !== 'qr_live') return
-
-    const durationSeconds = session.qr_duration_seconds ?? 60
-
-    async function rotateToken() {
-      const newToken = generateToken()
-      setToken(newToken)
-      setCountdown(durationSeconds)
-
-      const { error: tokenError } = await supabase
-        .from('sessions')
-        .update({ current_token: newToken })
-        .eq('id', session.id)
-
-      if (tokenError) {
-        console.error('Failed to sync current_token:', tokenError.message)
-      }
-    }
-
-    rotateToken()
-
-    const timer = setInterval(() => {
-      setCountdown((prev) => {
-        if (prev <= 1) {
-          rotateToken()
-          return durationSeconds
-        }
-        return prev - 1
-      })
-    }, 1000)
-
-    return () => clearInterval(timer)
-  }, [session?.status, session?.id, session?.qr_duration_seconds])
-
-  async function refreshAttendance() {
-    const { count, error: countError } = await supabase
-      .from('attendance_records')
-      .select('*', { count: 'exact', head: true })
-      .eq('session_id', session.id)
-
-    if (!countError) setPresentCount(count ?? 0)
-
-    const { data: manualData, error: manualError } = await supabase
-      .from('attendance_records')
-      .select('student_pgp_id, marked_at, students(name)')
-      .eq('session_id', session.id)
-      .eq('method', 'manual_entry')
-      .order('marked_at', { ascending: false })
-
-    if (!manualError) setManuallyMarked(manualData ?? [])
-  }
-
-  useEffect(() => {
-    if (session?.status !== 'qr_live') return
-
-    refreshAttendance()
-
-    const channel = supabase
-      .channel(`attendance-records-session-${session.id}`)
-      .on(
-        'postgres_changes',
-        {
-          event: 'INSERT',
-          schema: 'public',
-          table: 'attendance_records',
-          filter: `session_id=eq.${session.id}`,
-        },
-        (payload) => {
-          if (payload.new?.session_id !== session.id) return
-          refreshAttendance()
-        },
-      )
-      .subscribe()
-
-    return () => {
-      supabase.removeChannel(channel)
-    }
-  }, [session?.status, session?.id])
-
-  async function handleStart() {
-    setStarting(true)
-    setStartError('')
-
-    let position
-    try {
-      position = await getCurrentPosition()
-    } catch (geoError) {
-      setStarting(false)
-      setStartError(
-        `GPS reference is required to start the session. ${
-          geoError.message || 'Location access was denied or is unavailable.'
-        }`,
-      )
-      return
-    }
-
-    const { data, error: updateError } = await supabase
-      .from('sessions')
-      .update({
-        status: 'qr_live',
-        reference_lat: position.coords.latitude,
-        reference_lng: position.coords.longitude,
-        qr_started_at: new Date().toISOString(),
-        qr_duration_seconds: Number(durationInput),
-        session_date: getTodayISTDateString(),
-      })
-      .eq('id', session.id)
-      .select()
-      .single()
-
-    setStarting(false)
-
-    if (updateError) {
-      setStartError(updateError.message)
-      return
-    }
-
-    setSession(data)
-  }
-
-  async function handleEndSession() {
-    setEnding(true)
-    setEndError('')
-
-    const { data, error: updateError } = await supabase
-      .from('sessions')
-      .update({ status: 'ended' })
-      .eq('id', session.id)
-      .select()
-      .single()
-
-    setEnding(false)
-
-    if (updateError) {
-      setEndError(updateError.message)
-      return
-    }
-
-    setSession(data)
-  }
+    if (!toast) return
+    const timer = setTimeout(() => setToast(''), 2500)
+    return () => clearTimeout(timer)
+  }, [toast])
 
   if (loading) {
     return (
@@ -253,297 +72,122 @@ export default function Professor() {
     )
   }
 
+  const slotsByDay = DAYS.reduce((acc, day) => {
+    acc[day] = slots.filter((s) => s.day_of_week === day)
+    return acc
+  }, {})
+
   return (
     <PageShell>
       <Card>
         <div className="flex items-start justify-between gap-4">
-          <div>
-            <p className="text-sm font-medium text-maroon-600">Professor Dashboard</p>
-            <h1 className="mt-1 text-2xl font-bold text-gray-900 sm:text-3xl">
-              Session {session.session_number} · {displaySessionDate(session)}
-            </h1>
+          <div className="flex items-center gap-3">
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-maroon-50 text-maroon-600">
+              <CalendarDays className="h-5 w-5" />
+            </div>
+            <div>
+              <p className="text-sm font-medium text-maroon-600">Professor Dashboard</p>
+              <h1 className="mt-0.5 text-2xl font-bold text-gray-900 sm:text-3xl">
+                Weekly Schedule
+              </h1>
+            </div>
           </div>
-          <div className="mt-1 flex shrink-0 flex-col items-end gap-2">
-            <Link
-              to="/professor/anomalies"
-              className="text-sm font-medium text-maroon-600 hover:text-maroon-700"
-            >
-              View Anomalies →
-            </Link>
-            <SignOutButton />
-          </div>
+          <UserMenu />
         </div>
-
-        {session.status === 'not_started' && (
-          <div className="mt-10 flex flex-col items-center gap-4 py-8 text-center">
-            <p className="text-gray-500">This session hasn't started yet.</p>
-
-            <div className="flex items-center gap-2">
-              <label htmlFor="qr-duration" className="text-sm font-medium text-gray-700">
-                QR rotation
-              </label>
-              <input
-                id="qr-duration"
-                type="number"
-                min="1"
-                value={durationInput}
-                onChange={(e) => setDurationInput(e.target.value)}
-                className="w-24 rounded-lg border border-gray-300 px-3.5 py-2 text-center text-gray-900 outline-none transition focus:border-maroon-600 focus:ring-2 focus:ring-maroon-100"
-              />
-              <span className="text-sm text-gray-500">seconds</span>
-            </div>
-            <p className="text-xs text-gray-400">
-              Defaults to the course setting ({course.default_qr_duration_seconds}s) — override just
-              for this session if needed.
-            </p>
-
-            <button
-              type="button"
-              onClick={handleStart}
-              disabled={starting}
-              className="rounded-lg bg-maroon-600 px-8 py-3 text-lg font-medium text-white transition hover:bg-maroon-700 disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              {starting ? 'Starting…' : 'Start Session'}
-            </button>
-            {startError && (
-              <p role="alert" className="max-w-sm rounded-lg bg-red-50 px-3.5 py-2.5 text-sm text-red-700">
-                {startError}
-              </p>
-            )}
-          </div>
-        )}
-
-        {session.status === 'qr_live' && (
-          <div className="mt-10 flex flex-col items-center gap-12">
-            <div className="flex flex-col items-center gap-8 sm:flex-row sm:items-center sm:justify-center sm:gap-12">
-              <div className="w-full max-w-[380px] rounded-2xl border-4 border-maroon-600 bg-white p-4 shadow-lg sm:p-8">
-                <QRCodeSVG
-                  value={buildScanUrl(session.id, token)}
-                  size={340}
-                  style={{ width: '100%', height: 'auto' }}
-                />
-              </div>
-              <div className="text-center">
-                <p className="text-sm font-medium tracking-wide text-gray-500 uppercase">
-                  Refreshes in
-                </p>
-                <p className="text-7xl font-bold tabular-nums text-maroon-600">{countdown}s</p>
-              </div>
-            </div>
-
-            <div className="w-full rounded-xl bg-maroon-50 px-6 py-10 text-center">
-              <p className="text-8xl font-bold tabular-nums text-gray-900">{presentCount}</p>
-              <p className="mt-2 text-xl font-medium text-gray-600">students marked present</p>
-            </div>
-
-            <button
-              type="button"
-              onClick={handleEndSession}
-              disabled={ending}
-              className="rounded-lg border border-gray-300 px-6 py-2.5 font-medium text-gray-700 transition hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              {ending ? 'Ending…' : 'End Session'}
-            </button>
-            {endError && (
-              <p role="alert" className="max-w-sm rounded-lg bg-red-50 px-3.5 py-2.5 text-sm text-red-700">
-                {endError}
-              </p>
-            )}
-          </div>
-        )}
-
-        {session.status !== 'not_started' && session.status !== 'qr_live' && (
-          <p className="mt-10 text-gray-500">
-            Session status: <span className="font-medium">{session.status}</span>
-          </p>
-        )}
       </Card>
 
-      {session.status === 'qr_live' && (
-        <ManualOverrideCard
-          sessionId={session.id}
-          manuallyMarked={manuallyMarked}
-          onMarked={refreshAttendance}
-        />
+      <div className="mt-6 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-7">
+        {DAYS.map((day, i) => {
+          const isToday = day === today
+          return (
+            <div
+              key={day}
+              className={`rounded-xl p-4 shadow-sm ${
+                isToday ? 'bg-maroon-50 ring-2 ring-maroon-200' : 'bg-white'
+              } ${i > 0 ? 'sm:border-l sm:border-gray-100 lg:border-l' : ''}`}
+            >
+              <h2
+                className={`mb-3 text-xs font-semibold tracking-wide uppercase ${
+                  isToday ? 'text-maroon-700' : 'text-gray-500'
+                }`}
+              >
+                {day}
+                {isToday && <span className="ml-1 font-normal">· Today</span>}
+              </h2>
+
+              <div className="space-y-2">
+                {slotsByDay[day].length === 0 && (
+                  <p className="text-xs text-gray-400">No classes</p>
+                )}
+
+                {slotsByDay[day].map((slot) =>
+                  slot.is_functional ? (
+                    <Link
+                      key={slot.id}
+                      to={`/professor/live/${slot.linked_session_id}`}
+                      className="block cursor-pointer rounded-lg border border-gray-200 bg-white p-3 shadow-sm transition hover:border-maroon-300 hover:shadow-md"
+                    >
+                      <SlotCardContent slot={slot} />
+                    </Link>
+                  ) : (
+                    <button
+                      key={slot.id}
+                      type="button"
+                      onClick={() => setToast('Not enabled for this prototype demo')}
+                      className="block w-full rounded-lg border border-gray-100 bg-gray-50 p-3 text-left"
+                    >
+                      <SlotCardContent
+                        slot={slot}
+                        muted
+                        badge={
+                          <span className="shrink-0 rounded-full bg-gray-200 px-1.5 py-0.5 text-[10px] font-medium text-gray-500">
+                            Demo only
+                          </span>
+                        }
+                      />
+                    </button>
+                  ),
+                )}
+              </div>
+            </div>
+          )
+        })}
+      </div>
+
+      {toast && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 rounded-lg bg-gray-900 px-4 py-2.5 text-sm text-white shadow-lg">
+          {toast}
+        </div>
       )}
     </PageShell>
   )
 }
 
-function ManualOverrideCard({ sessionId, manuallyMarked, onMarked }) {
-  const [students, setStudents] = useState([])
-  const [searchText, setSearchText] = useState('')
-  const [selectedStudent, setSelectedStudent] = useState(null)
-  const [marking, setMarking] = useState(false)
-  const [message, setMessage] = useState({ type: '', text: '' })
-
-  useEffect(() => {
-    async function loadStudents() {
-      const { data, error } = await supabase.from('students').select('pgp_id, name').order('name')
-      if (!error) setStudents(data ?? [])
-    }
-    loadStudents()
-  }, [])
-
-  const filteredStudents =
-    searchText.trim() === ''
-      ? []
-      : students
-          .filter((s) => {
-            const q = searchText.toLowerCase()
-            return s.name.toLowerCase().includes(q) || s.pgp_id.toLowerCase().includes(q)
-          })
-          .slice(0, 8)
-
-  async function handleMarkPresent() {
-    if (!selectedStudent) return
-
-    setMarking(true)
-    setMessage({ type: '', text: '' })
-
-    const { data: existing, error: existingError } = await supabase
-      .from('attendance_records')
-      .select('id')
-      .eq('session_id', sessionId)
-      .eq('student_pgp_id', selectedStudent.pgp_id)
-      .maybeSingle()
-
-    if (existingError) {
-      setMarking(false)
-      setMessage({ type: 'error', text: existingError.message })
-      return
-    }
-
-    if (existing) {
-      setMarking(false)
-      setMessage({ type: 'info', text: `${selectedStudent.name} is already marked present.` })
-      return
-    }
-
-    const { error: insertError } = await supabase.from('attendance_records').insert({
-      session_id: sessionId,
-      student_pgp_id: selectedStudent.pgp_id,
-      method: 'manual_entry',
-      device_fingerprint: null,
-      gps_lat: null,
-      gps_lng: null,
-      gps_match: null,
-      verification_tier: 'manual',
-      flagged: false,
-      flag_reason: null,
-    })
-
-    if (insertError) {
-      setMarking(false)
-      setMessage({ type: 'error', text: insertError.message })
-      return
-    }
-
-    setMessage({ type: 'success', text: `${selectedStudent.name} marked present.` })
-    setSelectedStudent(null)
-    setSearchText('')
-
-    await onMarked()
-    setMarking(false)
-  }
-
+function SlotCardContent({ slot, muted, badge }) {
   return (
-    <div className="mt-6 rounded-xl bg-white p-6 shadow-sm sm:p-8">
-      <h2 className="text-base font-semibold text-gray-900">Manual Override — No Device</h2>
-      <p className="mt-1 text-sm text-gray-500">
-        For students without a phone, tablet, or laptop this session.
+    <>
+      <div className="flex items-center justify-between gap-2">
+        <p className={`text-xs font-medium tabular-nums ${muted ? 'text-gray-400' : 'text-gray-500'}`}>
+          {formatTimeRange(slot.start_time, slot.end_time)}
+        </p>
+        {badge}
+      </div>
+      <p className={`mt-1 text-sm font-semibold ${muted ? 'text-gray-500' : 'text-gray-900'}`}>
+        {slot.course_name} · {slot.section}
       </p>
-
-      <div className="relative mt-4 flex flex-col gap-3 sm:flex-row">
-        <div className="relative flex-1">
-          <input
-            type="text"
-            value={searchText}
-            onChange={(e) => {
-              setSearchText(e.target.value)
-              setSelectedStudent(null)
-              setMessage({ type: '', text: '' })
-            }}
-            placeholder="Search by name or PGP ID…"
-            className="w-full rounded-lg border border-gray-300 px-3.5 py-2.5 text-gray-900 outline-none transition focus:border-maroon-600 focus:ring-2 focus:ring-maroon-100"
-          />
-          {searchText && !selectedStudent && filteredStudents.length > 0 && (
-            <ul className="absolute z-10 mt-1 max-h-56 w-full overflow-y-auto rounded-lg border border-gray-200 bg-white shadow-lg">
-              {filteredStudents.map((s) => (
-                <li key={s.pgp_id}>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setSelectedStudent(s)
-                      setSearchText(`${s.name} (${s.pgp_id})`)
-                    }}
-                    className="block w-full px-3.5 py-2 text-left text-sm hover:bg-maroon-50"
-                  >
-                    <span className="font-medium text-gray-900">{s.name}</span>
-                    <span className="ml-2 text-gray-500">{s.pgp_id}</span>
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-        <button
-          type="button"
-          onClick={handleMarkPresent}
-          disabled={!selectedStudent || marking}
-          className="rounded-lg bg-maroon-600 px-6 py-2.5 font-medium whitespace-nowrap text-white transition hover:bg-maroon-700 disabled:cursor-not-allowed disabled:opacity-60"
-        >
-          {marking ? 'Marking…' : 'Mark Present'}
-        </button>
-      </div>
-
-      {message.text && (
-        <p
-          role="alert"
-          className={`mt-3 rounded-lg px-3.5 py-2.5 text-sm ${
-            message.type === 'error'
-              ? 'bg-red-50 text-red-700'
-              : message.type === 'info'
-                ? 'bg-amber-50 text-amber-700'
-                : 'bg-green-50 text-green-700'
-          }`}
-        >
-          {message.text}
-        </p>
-      )}
-
-      <div className="mt-6">
-        <p className="text-sm font-medium text-gray-700">
-          Manually marked ({manuallyMarked.length})
-        </p>
-        {manuallyMarked.length === 0 ? (
-          <p className="mt-2 text-sm text-gray-400">No manual entries yet.</p>
-        ) : (
-          <ul className="mt-2 divide-y divide-gray-100">
-            {manuallyMarked.map((row) => (
-              <li
-                key={row.student_pgp_id}
-                className="flex items-center justify-between py-2 text-sm"
-              >
-                <span className="font-medium text-gray-900">{row.students?.name}</span>
-                <span className="text-gray-500">{row.student_pgp_id}</span>
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
-    </div>
+      <p className={`text-xs ${muted ? 'text-gray-400' : 'text-gray-500'}`}>{slot.room}</p>
+    </>
   )
 }
 
 function PageShell({ children }) {
   return (
     <div className="min-h-screen bg-gray-50 px-4 py-8 sm:px-6 lg:px-8">
-      <div className="mx-auto max-w-3xl">{children}</div>
+      <div className="mx-auto max-w-6xl">{children}</div>
     </div>
   )
 }
 
 function Card({ children }) {
-  return <div className="rounded-xl bg-white p-6 shadow-lg sm:p-10 lg:p-12">{children}</div>
+  return <div className="rounded-xl bg-white p-6 shadow-md sm:p-8">{children}</div>
 }

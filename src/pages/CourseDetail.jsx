@@ -3,7 +3,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext.jsx'
 import { supabase } from '../lib/supabaseClient.js'
 import { formatDateIST, getTodayISTDateString } from '../lib/dateFormat.js'
-import SignOutButton from '../components/SignOutButton.jsx'
+import UserMenu from '../components/UserMenu.jsx'
 import QrScanner from '../components/QrScanner.jsx'
 
 function displaySessionDate(session) {
@@ -162,7 +162,7 @@ export default function CourseDetail() {
             <h1 className="mt-1 text-2xl font-bold text-gray-900 sm:text-3xl">{course.name}</h1>
             <p className="mt-1 text-sm text-gray-500">{course.professor_name}</p>
           </div>
-          <SignOutButton />
+          <UserMenu />
         </div>
 
         <div className="mt-6 flex flex-wrap items-center gap-x-2 gap-y-1">

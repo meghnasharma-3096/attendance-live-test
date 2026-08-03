@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext.jsx'
 import { supabase } from '../lib/supabaseClient.js'
-import SignOutButton from '../components/SignOutButton.jsx'
+import UserMenu from '../components/UserMenu.jsx'
 
 export default function Student() {
   const { user } = useAuth()
@@ -76,7 +76,7 @@ export default function Student() {
             <h1 className="mt-1 text-2xl font-bold text-gray-900 sm:text-3xl">{studentName}</h1>
             <p className="mt-2 text-sm text-gray-500">Your enrolled courses</p>
           </div>
-          <SignOutButton />
+          <UserMenu />
         </div>
       </Card>
 

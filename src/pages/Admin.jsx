@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { useAuth } from '../context/AuthContext.jsx'
 import { supabase } from '../lib/supabaseClient.js'
 import { formatDateIST, getTodayISTDateString } from '../lib/dateFormat.js'
-import SignOutButton from '../components/SignOutButton.jsx'
+import UserMenu from '../components/UserMenu.jsx'
 
 const STATUS_STYLES = {
   not_started: 'bg-gray-100 text-gray-600',
@@ -136,7 +136,7 @@ export default function Admin() {
               sessions planned
             </p>
           </div>
-          <SignOutButton />
+          <UserMenu />
         </div>
       </Card>
 

@@ -3,16 +3,22 @@ import { Link } from 'react-router-dom'
 import { QRCodeSVG } from 'qrcode.react'
 import { useAuth } from '../context/AuthContext.jsx'
 import { supabase } from '../lib/supabaseClient.js'
+import { formatDateIST, getTodayISTDateString } from '../lib/dateFormat.js'
+import SignOutButton from '../components/SignOutButton.jsx'
 
 const SESSION_NUMBER = 16
-const TOKEN_INTERVAL_SECONDS = 15
 
 function generateToken() {
   return Math.random().toString(36).substring(2, 10)
 }
 
-function buildScanUrl(token) {
-  return `${window.location.origin}${window.location.pathname}#/scan?session=${SESSION_NUMBER}&token=${token}`
+function buildScanUrl(sessionId, token) {
+  return `${window.location.origin}${window.location.pathname}#/scan?session=${sessionId}&token=${token}`
+}
+
+function displaySessionDate(session) {
+  const dateString = session.status === 'not_started' ? getTodayISTDateString() : session.session_date
+  return formatDateIST(dateString)
 }
 
 function getCurrentPosition() {
@@ -33,10 +39,14 @@ export default function Professor() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [session, setSession] = useState(null)
+  const [course, setCourse] = useState(null)
   const [starting, setStarting] = useState(false)
   const [startError, setStartError] = useState('')
+  const [ending, setEnding] = useState(false)
+  const [endError, setEndError] = useState('')
+  const [durationInput, setDurationInput] = useState('')
   const [token, setToken] = useState('')
-  const [countdown, setCountdown] = useState(TOKEN_INTERVAL_SECONDS)
+  const [countdown, setCountdown] = useState(0)
   const [presentCount, setPresentCount] = useState(0)
   const [manuallyMarked, setManuallyMarked] = useState([])
 
@@ -45,13 +55,13 @@ export default function Professor() {
       setLoading(true)
       setError('')
 
-      const { data: course, error: courseError } = await supabase
+      const { data: courseRow, error: courseError } = await supabase
         .from('courses')
-        .select('id')
+        .select('id, default_qr_duration_seconds')
         .limit(1)
         .maybeSingle()
 
-      if (courseError || !course) {
+      if (courseError || !courseRow) {
         setError(courseError?.message ?? 'No course found')
         setLoading(false)
         return
@@ -59,8 +69,8 @@ export default function Professor() {
 
       const { data: sessionRow, error: sessionError } = await supabase
         .from('sessions')
-        .select('id, session_number, session_date, status')
-        .eq('course_id', course.id)
+        .select('id, session_number, session_date, status, qr_duration_seconds')
+        .eq('course_id', courseRow.id)
         .eq('session_number', SESSION_NUMBER)
         .maybeSingle()
 
@@ -70,7 +80,9 @@ export default function Professor() {
         return
       }
 
+      setCourse(courseRow)
       setSession(sessionRow)
+      setDurationInput(String(sessionRow.qr_duration_seconds ?? courseRow.default_qr_duration_seconds))
       setLoading(false)
     }
 
@@ -80,10 +92,12 @@ export default function Professor() {
   useEffect(() => {
     if (session?.status !== 'qr_live') return
 
+    const durationSeconds = session.qr_duration_seconds ?? 60
+
     async function rotateToken() {
       const newToken = generateToken()
       setToken(newToken)
-      setCountdown(TOKEN_INTERVAL_SECONDS)
+      setCountdown(durationSeconds)
 
       const { error: tokenError } = await supabase
         .from('sessions')
@@ -101,14 +115,14 @@ export default function Professor() {
       setCountdown((prev) => {
         if (prev <= 1) {
           rotateToken()
-          return TOKEN_INTERVAL_SECONDS
+          return durationSeconds
         }
         return prev - 1
       })
     }, 1000)
 
     return () => clearInterval(timer)
-  }, [session?.status, session?.id])
+  }, [session?.status, session?.id, session?.qr_duration_seconds])
 
   async function refreshAttendance() {
     const { count, error: countError } = await supabase
@@ -179,6 +193,8 @@ export default function Professor() {
         reference_lat: position.coords.latitude,
         reference_lng: position.coords.longitude,
         qr_started_at: new Date().toISOString(),
+        qr_duration_seconds: Number(durationInput),
+        session_date: getTodayISTDateString(),
       })
       .eq('id', session.id)
       .select()
@@ -188,6 +204,27 @@ export default function Professor() {
 
     if (updateError) {
       setStartError(updateError.message)
+      return
+    }
+
+    setSession(data)
+  }
+
+  async function handleEndSession() {
+    setEnding(true)
+    setEndError('')
+
+    const { data, error: updateError } = await supabase
+      .from('sessions')
+      .update({ status: 'ended' })
+      .eq('id', session.id)
+      .select()
+      .single()
+
+    setEnding(false)
+
+    if (updateError) {
+      setEndError(updateError.message)
       return
     }
 
@@ -223,20 +260,43 @@ export default function Professor() {
           <div>
             <p className="text-sm font-medium text-maroon-600">Professor Dashboard</p>
             <h1 className="mt-1 text-2xl font-bold text-gray-900 sm:text-3xl">
-              Session {session.session_number} · {session.session_date}
+              Session {session.session_number} · {displaySessionDate(session)}
             </h1>
           </div>
-          <Link
-            to="/professor/anomalies"
-            className="mt-1 shrink-0 text-sm font-medium text-maroon-600 hover:text-maroon-700"
-          >
-            View Anomalies →
-          </Link>
+          <div className="mt-1 flex shrink-0 flex-col items-end gap-2">
+            <Link
+              to="/professor/anomalies"
+              className="text-sm font-medium text-maroon-600 hover:text-maroon-700"
+            >
+              View Anomalies →
+            </Link>
+            <SignOutButton />
+          </div>
         </div>
 
         {session.status === 'not_started' && (
           <div className="mt-10 flex flex-col items-center gap-4 py-8 text-center">
             <p className="text-gray-500">This session hasn't started yet.</p>
+
+            <div className="flex items-center gap-2">
+              <label htmlFor="qr-duration" className="text-sm font-medium text-gray-700">
+                QR rotation
+              </label>
+              <input
+                id="qr-duration"
+                type="number"
+                min="1"
+                value={durationInput}
+                onChange={(e) => setDurationInput(e.target.value)}
+                className="w-24 rounded-lg border border-gray-300 px-3.5 py-2 text-center text-gray-900 outline-none transition focus:border-maroon-600 focus:ring-2 focus:ring-maroon-100"
+              />
+              <span className="text-sm text-gray-500">seconds</span>
+            </div>
+            <p className="text-xs text-gray-400">
+              Defaults to the course setting ({course.default_qr_duration_seconds}s) — override just
+              for this session if needed.
+            </p>
+
             <button
               type="button"
               onClick={handleStart}
@@ -258,7 +318,7 @@ export default function Professor() {
             <div className="flex flex-col items-center gap-8 sm:flex-row sm:items-center sm:justify-center sm:gap-12">
               <div className="w-full max-w-[380px] rounded-2xl border-4 border-maroon-600 bg-white p-4 shadow-lg sm:p-8">
                 <QRCodeSVG
-                  value={buildScanUrl(token)}
+                  value={buildScanUrl(session.id, token)}
                   size={340}
                   style={{ width: '100%', height: 'auto' }}
                 />
@@ -275,6 +335,20 @@ export default function Professor() {
               <p className="text-8xl font-bold tabular-nums text-gray-900">{presentCount}</p>
               <p className="mt-2 text-xl font-medium text-gray-600">students marked present</p>
             </div>
+
+            <button
+              type="button"
+              onClick={handleEndSession}
+              disabled={ending}
+              className="rounded-lg border border-gray-300 px-6 py-2.5 font-medium text-gray-700 transition hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {ending ? 'Ending…' : 'End Session'}
+            </button>
+            {endError && (
+              <p role="alert" className="max-w-sm rounded-lg bg-red-50 px-3.5 py-2.5 text-sm text-red-700">
+                {endError}
+              </p>
+            )}
           </div>
         )}
 

@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
 import { useAuth } from '../context/AuthContext.jsx'
 import { supabase } from '../lib/supabaseClient.js'
+import { formatDateIST, getTodayISTDateString } from '../lib/dateFormat.js'
+import SignOutButton from '../components/SignOutButton.jsx'
 
 const STATUS_STYLES = {
   not_started: 'bg-gray-100 text-gray-600',
@@ -15,6 +17,11 @@ function statusLabel(status) {
   return status
 }
 
+function displaySessionDate(session) {
+  const dateString = session.status === 'not_started' ? getTodayISTDateString() : session.session_date
+  return formatDateIST(dateString)
+}
+
 export default function Admin() {
   const { user } = useAuth()
   const [loading, setLoading] = useState(true)
@@ -22,6 +29,9 @@ export default function Admin() {
   const [course, setCourse] = useState(null)
   const [students, setStudents] = useState([])
   const [sessions, setSessions] = useState([])
+  const [durationInput, setDurationInput] = useState('')
+  const [savingDuration, setSavingDuration] = useState(false)
+  const [saveMessage, setSaveMessage] = useState(null)
 
   useEffect(() => {
     if (!user) return
@@ -32,7 +42,7 @@ export default function Admin() {
 
       const { data: courseRow, error: courseError } = await supabase
         .from('courses')
-        .select('id, name, professor_name, total_sessions')
+        .select('id, name, professor_name, total_sessions, default_qr_duration_seconds')
         .limit(1)
         .maybeSingle()
 
@@ -63,6 +73,7 @@ export default function Admin() {
       }
 
       setCourse(courseRow)
+      setDurationInput(String(courseRow.default_qr_duration_seconds))
       setStudents(studentsRes.data ?? [])
       setSessions(sessionsRes.data ?? [])
       setLoading(false)
@@ -70,6 +81,26 @@ export default function Admin() {
 
     loadData()
   }, [user])
+
+  async function handleSaveDuration() {
+    setSavingDuration(true)
+    setSaveMessage(null)
+
+    const { error: updateError } = await supabase
+      .from('courses')
+      .update({ default_qr_duration_seconds: Number(durationInput) })
+      .eq('id', course.id)
+
+    setSavingDuration(false)
+
+    if (updateError) {
+      setSaveMessage({ type: 'error', text: updateError.message })
+      return
+    }
+
+    setCourse((prev) => ({ ...prev, default_qr_duration_seconds: Number(durationInput) }))
+    setSaveMessage({ type: 'success', text: 'Saved.' })
+  }
 
   if (loading) {
     return (
@@ -96,13 +127,57 @@ export default function Admin() {
   return (
     <PageShell>
       <Card>
-        <p className="text-sm font-medium text-maroon-600">Admin Dashboard</p>
-        <h1 className="mt-1 text-2xl font-bold text-gray-900 sm:text-3xl">{course.name}</h1>
-        <p className="mt-2 text-sm text-gray-500">
-          {course.professor_name} · {students.length} students · {course.total_sessions} sessions
-          planned
-        </p>
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <p className="text-sm font-medium text-maroon-600">Admin Dashboard</p>
+            <h1 className="mt-1 text-2xl font-bold text-gray-900 sm:text-3xl">{course.name}</h1>
+            <p className="mt-2 text-sm text-gray-500">
+              {course.professor_name} · {students.length} students · {course.total_sessions}{' '}
+              sessions planned
+            </p>
+          </div>
+          <SignOutButton />
+        </div>
       </Card>
+
+      <div className="mt-6 rounded-xl bg-white p-6 shadow-sm sm:p-8">
+        <h2 className="text-base font-semibold text-gray-900">Settings</h2>
+        <p className="mt-1 text-sm text-gray-500">
+          Default QR rotation duration for new sessions. Professors can override this per session.
+        </p>
+
+        <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center">
+          <div className="flex items-center gap-2">
+            <input
+              type="number"
+              min="1"
+              value={durationInput}
+              onChange={(e) => setDurationInput(e.target.value)}
+              className="w-28 rounded-lg border border-gray-300 px-3.5 py-2.5 text-gray-900 outline-none transition focus:border-maroon-600 focus:ring-2 focus:ring-maroon-100"
+            />
+            <span className="text-sm text-gray-500">seconds</span>
+          </div>
+          <button
+            type="button"
+            onClick={handleSaveDuration}
+            disabled={savingDuration}
+            className="rounded-lg bg-maroon-600 px-6 py-2.5 font-medium text-white transition hover:bg-maroon-700 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {savingDuration ? 'Saving…' : 'Save'}
+          </button>
+        </div>
+
+        {saveMessage && (
+          <p
+            role="alert"
+            className={`mt-3 rounded-lg px-3.5 py-2.5 text-sm ${
+              saveMessage.type === 'error' ? 'bg-red-50 text-red-700' : 'bg-green-50 text-green-700'
+            }`}
+          >
+            {saveMessage.text}
+          </p>
+        )}
+      </div>
 
       <div className="mt-6 rounded-xl bg-white shadow-sm">
         <div className="border-b border-gray-100 px-6 py-4">
@@ -154,7 +229,7 @@ export default function Admin() {
                   <td className="px-6 py-3 font-medium text-gray-900">
                     {session.session_number}
                   </td>
-                  <td className="px-6 py-3 text-gray-600">{session.session_date}</td>
+                  <td className="px-6 py-3 text-gray-600">{displaySessionDate(session)}</td>
                   <td className="px-6 py-3">
                     <span
                       className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${

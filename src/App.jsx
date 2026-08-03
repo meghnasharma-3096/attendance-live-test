@@ -1,6 +1,7 @@
 import { Navigate, Route, Routes } from 'react-router-dom'
 import Login from './pages/Login.jsx'
 import Student from './pages/Student.jsx'
+import CourseDetail from './pages/CourseDetail.jsx'
 import Professor from './pages/Professor.jsx'
 import Admin from './pages/Admin.jsx'
 import Scan from './pages/Scan.jsx'
@@ -18,6 +19,14 @@ export default function App() {
         element={
           <ProtectedRoute role="student">
             <Student />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/student/course/:courseId"
+        element={
+          <ProtectedRoute role="student">
+            <CourseDetail />
           </ProtectedRoute>
         }
       />

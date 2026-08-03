@@ -4,7 +4,6 @@ import FingerprintJS from '@fingerprintjs/fingerprintjs'
 import { useAuth } from '../context/AuthContext.jsx'
 import { supabase } from '../lib/supabaseClient.js'
 
-const ATTENDANCE_WINDOW_MS = 7 * 60 * 1000
 const GPS_MATCH_RADIUS_METERS = 100
 
 function haversineDistanceMeters(lat1, lon1, lat2, lon2) {
@@ -36,55 +35,44 @@ export default function Scan() {
   const [searchParams] = useSearchParams()
   const [phase, setPhase] = useState('loading')
   const [message, setMessage] = useState('')
+  const [sessionNumber, setSessionNumber] = useState(null)
 
-  const sessionNumber = searchParams.get('session')
+  const sessionId = searchParams.get('session')
   const token = searchParams.get('token')
 
   useEffect(() => {
     if (!user) return
 
     async function run() {
-      if (!sessionNumber || !token) {
+      if (!sessionId || !token) {
         setPhase('error')
         setMessage('This QR link is missing required information.')
         return
       }
 
-      const { data: course, error: courseError } = await supabase
-        .from('courses')
-        .select('id')
-        .limit(1)
-        .maybeSingle()
-
-      if (courseError || !course) {
-        setPhase('error')
-        setMessage(courseError?.message ?? 'No course found.')
-        return
-      }
-
       const { data: session, error: sessionError } = await supabase
         .from('sessions')
-        .select('id, session_number, current_token, qr_started_at, reference_lat, reference_lng, status')
-        .eq('course_id', course.id)
-        .eq('session_number', sessionNumber)
+        .select('id, session_number, current_token, reference_lat, reference_lng, status')
+        .eq('id', sessionId)
         .maybeSingle()
 
       if (sessionError || !session) {
         setPhase('error')
-        setMessage(sessionError?.message ?? `Session ${sessionNumber} not found.`)
+        setMessage(sessionError?.message ?? 'Session not found.')
+        return
+      }
+
+      setSessionNumber(session.session_number)
+
+      if (session.status !== 'qr_live') {
+        setPhase('closed')
+        setMessage('Attendance is closed for this session.')
         return
       }
 
       if (token !== session.current_token) {
         setPhase('expired')
         setMessage('This QR code has expired — scan the current one on screen.')
-        return
-      }
-
-      const elapsedMs = Date.now() - new Date(session.qr_started_at).getTime()
-      if (elapsedMs > ATTENDANCE_WINDOW_MS) {
-        setPhase('closed')
-        setMessage('Attendance window has closed for this session.')
         return
       }
 
@@ -170,7 +158,7 @@ export default function Scan() {
     }
 
     run()
-  }, [user, sessionNumber, token])
+  }, [user, sessionId, token])
 
   return (
     <PageShell>
@@ -187,7 +175,7 @@ export default function Scan() {
         )}
 
         {phase === 'expired' && <StatusBlock tone="warning" title="QR code expired" message={message} />}
-        {phase === 'closed' && <StatusBlock tone="warning" title="Window closed" message={message} />}
+        {phase === 'closed' && <StatusBlock tone="warning" title="Attendance closed" message={message} />}
         {phase === 'device-used' && (
           <StatusBlock tone="error" title="Device already used" message={message} />
         )}

@@ -26,12 +26,19 @@ export default function Admin() {
   const { user } = useAuth()
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
-  const [course, setCourse] = useState(null)
+  const [courses, setCourses] = useState([])
   const [students, setStudents] = useState([])
+  const [selectedCourseId, setSelectedCourseId] = useState(null)
+
+  const [sessionsLoading, setSessionsLoading] = useState(true)
+  const [sessionsError, setSessionsError] = useState('')
   const [sessions, setSessions] = useState([])
+
   const [durationInput, setDurationInput] = useState('')
   const [savingDuration, setSavingDuration] = useState(false)
   const [saveMessage, setSaveMessage] = useState(null)
+
+  const selectedCourse = courses.find((c) => c.id === selectedCourseId) ?? null
 
   useEffect(() => {
     if (!user) return
@@ -40,47 +47,62 @@ export default function Admin() {
       setLoading(true)
       setError('')
 
-      const { data: courseRow, error: courseError } = await supabase
-        .from('courses')
-        .select('id, name, professor_name, total_sessions, default_qr_duration_seconds')
-        .limit(1)
-        .maybeSingle()
+      const [coursesRes, studentsRes] = await Promise.all([
+        supabase
+          .from('courses')
+          .select('id, name, professor_name, total_sessions, default_qr_duration_seconds')
+          .order('created_at'),
+        supabase.from('students').select('pgp_id, name').order('name'),
+      ])
 
-      if (courseError || !courseRow) {
-        setError(courseError?.message ?? 'No course found')
+      if (coursesRes.error || !coursesRes.data || coursesRes.data.length === 0) {
+        setError(coursesRes.error?.message ?? 'No courses found')
         setLoading(false)
         return
       }
-
-      const [studentsRes, sessionsRes] = await Promise.all([
-        supabase.from('students').select('pgp_id, name').order('name'),
-        supabase
-          .from('sessions')
-          .select('session_number, session_date, status')
-          .eq('course_id', courseRow.id)
-          .order('session_number'),
-      ])
-
       if (studentsRes.error) {
         setError(studentsRes.error.message)
         setLoading(false)
         return
       }
-      if (sessionsRes.error) {
-        setError(sessionsRes.error.message)
-        setLoading(false)
-        return
-      }
 
-      setCourse(courseRow)
-      setDurationInput(String(courseRow.default_qr_duration_seconds))
+      setCourses(coursesRes.data)
       setStudents(studentsRes.data ?? [])
-      setSessions(sessionsRes.data ?? [])
+      setSelectedCourseId(coursesRes.data[0].id)
       setLoading(false)
     }
 
     loadData()
   }, [user])
+
+  useEffect(() => {
+    if (!selectedCourse) return
+
+    setDurationInput(String(selectedCourse.default_qr_duration_seconds))
+    setSaveMessage(null)
+
+    async function loadSessions() {
+      setSessionsLoading(true)
+      setSessionsError('')
+
+      const { data, error: sessionsErr } = await supabase
+        .from('sessions')
+        .select('session_number, session_date, status')
+        .eq('course_id', selectedCourse.id)
+        .order('session_number')
+
+      if (sessionsErr) {
+        setSessionsError(sessionsErr.message)
+        setSessionsLoading(false)
+        return
+      }
+
+      setSessions(data ?? [])
+      setSessionsLoading(false)
+    }
+
+    loadSessions()
+  }, [selectedCourse?.id])
 
   async function handleSaveDuration() {
     setSavingDuration(true)
@@ -89,7 +111,7 @@ export default function Admin() {
     const { error: updateError } = await supabase
       .from('courses')
       .update({ default_qr_duration_seconds: Number(durationInput) })
-      .eq('id', course.id)
+      .eq('id', selectedCourse.id)
 
     setSavingDuration(false)
 
@@ -98,7 +120,13 @@ export default function Admin() {
       return
     }
 
-    setCourse((prev) => ({ ...prev, default_qr_duration_seconds: Number(durationInput) }))
+    setCourses((prev) =>
+      prev.map((c) =>
+        c.id === selectedCourse.id
+          ? { ...c, default_qr_duration_seconds: Number(durationInput) }
+          : c,
+      ),
+    )
     setSaveMessage({ type: 'success', text: 'Saved.' })
   }
 
@@ -130,20 +158,40 @@ export default function Admin() {
         <div className="flex items-start justify-between gap-4">
           <div>
             <p className="text-sm font-medium text-maroon-600">Admin Dashboard</p>
-            <h1 className="mt-1 text-2xl font-bold text-gray-900 sm:text-3xl">{course.name}</h1>
+            <h1 className="mt-1 text-2xl font-bold text-gray-900 sm:text-3xl">
+              {selectedCourse.name}
+            </h1>
             <p className="mt-2 text-sm text-gray-500">
-              {course.professor_name} · {students.length} students · {course.total_sessions}{' '}
-              sessions planned
+              {selectedCourse.professor_name} · {students.length} students ·{' '}
+              {selectedCourse.total_sessions} sessions planned
             </p>
           </div>
           <UserMenu />
+        </div>
+
+        <div className="mt-6 flex flex-wrap gap-2 border-t border-gray-100 pt-4">
+          {courses.map((c) => (
+            <button
+              key={c.id}
+              type="button"
+              onClick={() => setSelectedCourseId(c.id)}
+              className={`rounded-lg px-4 py-2 text-sm font-medium transition ${
+                c.id === selectedCourseId
+                  ? 'bg-maroon-600 text-white'
+                  : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+              }`}
+            >
+              {c.name}
+            </button>
+          ))}
         </div>
       </Card>
 
       <div className="mt-6 rounded-xl bg-white p-6 shadow-sm sm:p-8">
         <h2 className="text-base font-semibold text-gray-900">Settings</h2>
         <p className="mt-1 text-sm text-gray-500">
-          Default QR rotation duration for new sessions. Professors can override this per session.
+          Default QR rotation duration for new sessions in <strong>{selectedCourse.name}</strong>.
+          Professors can override this per session.
         </p>
 
         <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center">
@@ -208,42 +256,52 @@ export default function Admin() {
       <div className="mt-6 overflow-hidden rounded-xl bg-white shadow-sm">
         <div className="border-b border-gray-100 px-6 py-4">
           <h2 className="text-base font-semibold text-gray-900">
-            Sessions ({sessions.length})
+            Sessions {sessionsLoading ? '' : `(${sessions.length})`}
           </h2>
         </div>
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-sm">
-            <thead>
-              <tr className="border-b border-gray-100 text-xs font-medium tracking-wide text-gray-500 uppercase">
-                <th className="px-6 py-3">Session #</th>
-                <th className="px-6 py-3">Date</th>
-                <th className="px-6 py-3">Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              {sessions.map((session, i) => (
-                <tr
-                  key={session.session_number}
-                  className={i % 2 === 0 ? 'bg-white' : 'bg-gray-50'}
-                >
-                  <td className="px-6 py-3 font-medium text-gray-900">
-                    {session.session_number}
-                  </td>
-                  <td className="px-6 py-3 text-gray-600">{displaySessionDate(session)}</td>
-                  <td className="px-6 py-3">
-                    <span
-                      className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${
-                        STATUS_STYLES[session.status] ?? 'bg-gray-100 text-gray-600'
-                      }`}
-                    >
-                      {statusLabel(session.status)}
-                    </span>
-                  </td>
+        {sessionsLoading ? (
+          <p className="px-6 py-4 text-sm text-gray-500">Loading…</p>
+        ) : sessionsError ? (
+          <p role="alert" className="px-6 py-4 text-sm text-red-700">
+            {sessionsError}
+          </p>
+        ) : sessions.length === 0 ? (
+          <p className="px-6 py-4 text-sm text-gray-400">No sessions scheduled yet.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-sm">
+              <thead>
+                <tr className="border-b border-gray-100 text-xs font-medium tracking-wide text-gray-500 uppercase">
+                  <th className="px-6 py-3">Session #</th>
+                  <th className="px-6 py-3">Date</th>
+                  <th className="px-6 py-3">Status</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+              </thead>
+              <tbody>
+                {sessions.map((session, i) => (
+                  <tr
+                    key={session.session_number}
+                    className={i % 2 === 0 ? 'bg-white' : 'bg-gray-50'}
+                  >
+                    <td className="px-6 py-3 font-medium text-gray-900">
+                      {session.session_number}
+                    </td>
+                    <td className="px-6 py-3 text-gray-600">{displaySessionDate(session)}</td>
+                    <td className="px-6 py-3">
+                      <span
+                        className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${
+                          STATUS_STYLES[session.status] ?? 'bg-gray-100 text-gray-600'
+                        }`}
+                      >
+                        {statusLabel(session.status)}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
     </PageShell>
   )

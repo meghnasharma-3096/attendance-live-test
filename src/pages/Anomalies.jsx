@@ -7,6 +7,16 @@ function truncateFingerprint(fingerprint) {
   return fingerprint.length > 12 ? `${fingerprint.slice(0, 12)}…` : fingerprint
 }
 
+// "Overlap" is defined practically, since sessions don't store explicit start/end times —
+// only attendance_records.marked_at is real evidence of when a session was actually live.
+// Two same-day QR scans for the same student in different courses within this window are
+// close enough that a real person could not physically have been in both classrooms.
+const OVERLAP_WINDOW_MINUTES = 15
+
+function istDateString(timestamp) {
+  return new Date(timestamp).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' })
+}
+
 export default function Anomalies() {
   const [running, setRunning] = useState(false)
   const [hasRun, setHasRun] = useState(false)
@@ -18,6 +28,7 @@ export default function Anomalies() {
   const [appealResponseInputs, setAppealResponseInputs] = useState({})
   const [resolvingAppealId, setResolvingAppealId] = useState(null)
   const [appealActionError, setAppealActionError] = useState('')
+  const [sameTimeAcrossCourses, setSameTimeAcrossCourses] = useState([])
 
   async function runCheck() {
     setRunning(true)
@@ -150,6 +161,61 @@ export default function Anomalies() {
         sessionNumber: row.sessions?.session_number,
       })),
     )
+
+    const { data: qrRows, error: qrError } = await supabase
+      .from('attendance_records')
+      .select(
+        'student_pgp_id, marked_at, students(name), sessions(session_number, course_id, courses(name))',
+      )
+      .eq('method', 'qr_scan')
+
+    if (qrError) {
+      setRunning(false)
+      setError(qrError.message)
+      return
+    }
+
+    const qrByStudent = new Map()
+    for (const row of qrRows ?? []) {
+      if (!row.sessions) continue
+      const list = qrByStudent.get(row.student_pgp_id) ?? []
+      list.push({
+        name: row.students?.name ?? row.student_pgp_id,
+        markedAt: row.marked_at,
+        sessionNumber: row.sessions.session_number,
+        courseId: row.sessions.course_id,
+        courseName: row.sessions.courses?.name ?? 'Unknown course',
+      })
+      qrByStudent.set(row.student_pgp_id, list)
+    }
+
+    const windowMs = OVERLAP_WINDOW_MINUTES * 60 * 1000
+    const overlaps = []
+
+    for (const [pgpId, records] of qrByStudent.entries()) {
+      for (let i = 0; i < records.length; i++) {
+        for (let j = i + 1; j < records.length; j++) {
+          const a = records[i]
+          const b = records[j]
+          if (a.courseId === b.courseId) continue
+
+          const diffMs = Math.abs(new Date(a.markedAt).getTime() - new Date(b.markedAt).getTime())
+          if (diffMs > windowMs) continue
+          if (istDateString(a.markedAt) !== istDateString(b.markedAt)) continue
+
+          overlaps.push({
+            pgpId,
+            name: a.name,
+            gapMinutes: Math.round(diffMs / 60000),
+            a,
+            b,
+          })
+        }
+      }
+    }
+
+    overlaps.sort((x, y) => x.gapMinutes - y.gapMinutes)
+    setSameTimeAcrossCourses(overlaps)
 
     setHasRun(true)
     setRunning(false)
@@ -402,6 +468,60 @@ export default function Anomalies() {
             <p className="mt-2 text-xs text-gray-400">
               Marked present at the start of a session but did not respond to that session's random
               mid-class re-verification check — a likely "scan and leave" pattern.
+            </p>
+          </div>
+
+          <div className="mt-6">
+            <h2 className="text-base font-semibold text-gray-900">Same-Time Attendance Across Courses</h2>
+            {sameTimeAcrossCourses.length === 0 ? (
+              <EmptyState />
+            ) : (
+              <div className="mt-3 overflow-hidden rounded-xl border-l-4 border-red-400 bg-white shadow-sm">
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-sm">
+                    <thead>
+                      <tr className="border-b border-gray-100 text-xs font-medium tracking-wide text-gray-500 uppercase">
+                        <th className="px-6 py-3">Student</th>
+                        <th className="px-6 py-3">PGP ID</th>
+                        <th className="px-6 py-3">Course / Session A</th>
+                        <th className="px-6 py-3">Time A</th>
+                        <th className="px-6 py-3">Course / Session B</th>
+                        <th className="px-6 py-3">Time B</th>
+                        <th className="px-6 py-3">Gap</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {sameTimeAcrossCourses.map((row, i) => (
+                        <tr
+                          key={`${row.pgpId}-${row.a.markedAt}-${row.b.markedAt}`}
+                          className={i % 2 === 0 ? 'bg-white' : 'bg-red-50/40'}
+                        >
+                          <td className="px-6 py-3 font-medium text-gray-900">{row.name}</td>
+                          <td className="px-6 py-3 text-gray-600">{row.pgpId}</td>
+                          <td className="px-6 py-3 text-gray-600">
+                            {row.a.courseName} · Session {row.a.sessionNumber}
+                          </td>
+                          <td className="px-6 py-3 text-gray-600">{formatDateTimeIST(row.a.markedAt)}</td>
+                          <td className="px-6 py-3 text-gray-600">
+                            {row.b.courseName} · Session {row.b.sessionNumber}
+                          </td>
+                          <td className="px-6 py-3 text-gray-600">{formatDateTimeIST(row.b.markedAt)}</td>
+                          <td className="px-6 py-3">
+                            <span className="inline-flex rounded-full bg-red-100 px-2.5 py-1 text-xs font-medium text-red-800">
+                              {row.gapMinutes} min
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+            <p className="mt-2 text-xs text-gray-400">
+              Marked present via QR scan in two different courses on the same day within{' '}
+              {OVERLAP_WINDOW_MINUTES} minutes — a real person cannot physically be in two classrooms
+              at once. Manual entries are excluded, since they aren't device/location-verified anyway.
             </p>
           </div>
         </>

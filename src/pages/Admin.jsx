@@ -37,6 +37,19 @@ function displaySessionDate(session) {
   return formatDateIST(isStale ? todayString : session.session_date)
 }
 
+function timeToMinutes(time) {
+  const [h, m] = time.split(':').map(Number)
+  return h * 60 + m
+}
+
+function timeRangesOverlap(aStart, aEnd, bStart, bEnd) {
+  return timeToMinutes(aStart) < timeToMinutes(bEnd) && timeToMinutes(bStart) < timeToMinutes(aEnd)
+}
+
+function emptySlotForm() {
+  return { day_of_week: 'Mon', start_time: '10:30', end_time: '12:00', section: '', room: '', is_functional: false }
+}
+
 export default function Admin() {
   const { user } = useAuth()
   const [loading, setLoading] = useState(true)
@@ -56,7 +69,17 @@ export default function Admin() {
   const [exportingCourse, setExportingCourse] = useState(false)
   const [exportError, setExportError] = useState('')
 
-  const [functionalSlots, setFunctionalSlots] = useState([])
+  const [timetableSlots, setTimetableSlots] = useState([])
+  const [slotsLoading, setSlotsLoading] = useState(true)
+  const [slotsError, setSlotsError] = useState('')
+  const [timetableMessage, setTimetableMessage] = useState(null)
+
+  const [slotFormOpen, setSlotFormOpen] = useState(false)
+  const [editingSlotId, setEditingSlotId] = useState(null)
+  const [slotForm, setSlotForm] = useState(emptySlotForm())
+  const [savingSlot, setSavingSlot] = useState(false)
+  const [slotFormError, setSlotFormError] = useState('')
+
   const [weeksInput, setWeeksInput] = useState('4')
   const [generating, setGenerating] = useState(false)
   const [generateMessage, setGenerateMessage] = useState(null)
@@ -104,6 +127,9 @@ export default function Admin() {
     setDurationInput(String(selectedCourse.default_qr_duration_seconds))
     setSaveMessage(null)
     setGenerateMessage(null)
+    setTimetableMessage(null)
+    setSlotFormOpen(false)
+    setEditingSlotId(null)
 
     async function loadSessions() {
       setSessionsLoading(true)
@@ -125,21 +151,148 @@ export default function Admin() {
       setSessionsLoading(false)
     }
 
-    async function loadFunctionalSlots() {
-      const shortCode = courseShortCode(selectedCourse.name)
-      const { data } = await supabase
-        .from('timetable_slots')
-        .select('id, day_of_week')
-        .eq('course_name', shortCode)
-        .eq('is_functional', true)
-
-      setFunctionalSlots(data ?? [])
-    }
-
     loadSessions()
-    loadFunctionalSlots()
+    loadTimetableSlots(selectedCourse)
   }, [selectedCourse?.id])
 
+  async function loadTimetableSlots(course) {
+    setSlotsLoading(true)
+    setSlotsError('')
+
+    const shortCode = courseShortCode(course.name)
+    const { data, error: slotsErr } = await supabase
+      .from('timetable_slots')
+      .select('id, day_of_week, start_time, end_time, section, room, is_functional')
+      .eq('course_name', shortCode)
+
+    if (slotsErr) {
+      setSlotsError(slotsErr.message)
+      setSlotsLoading(false)
+      return
+    }
+
+    const sorted = (data ?? []).sort((a, b) => {
+      const dayDiff = DAY_ORDER.indexOf(a.day_of_week) - DAY_ORDER.indexOf(b.day_of_week)
+      return dayDiff !== 0 ? dayDiff : a.start_time.localeCompare(b.start_time)
+    })
+
+    setTimetableSlots(sorted)
+    setSlotsLoading(false)
+  }
+
+  function handleOpenAddSlot() {
+    setEditingSlotId(null)
+    setSlotForm(emptySlotForm())
+    setSlotFormError('')
+    setTimetableMessage(null)
+    setSlotFormOpen(true)
+  }
+
+  function handleOpenEditSlot(slot) {
+    setEditingSlotId(slot.id)
+    setSlotForm({
+      day_of_week: slot.day_of_week,
+      start_time: slot.start_time.slice(0, 5),
+      end_time: slot.end_time.slice(0, 5),
+      section: slot.section,
+      room: slot.room,
+      is_functional: slot.is_functional,
+    })
+    setSlotFormError('')
+    setTimetableMessage(null)
+    setSlotFormOpen(true)
+  }
+
+  function handleCloseSlotForm() {
+    setSlotFormOpen(false)
+    setEditingSlotId(null)
+    setSlotFormError('')
+  }
+
+  async function handleSaveSlot() {
+    setSlotFormError('')
+
+    const { day_of_week, start_time, end_time, section, room, is_functional } = slotForm
+
+    if (!section.trim() || !room.trim()) {
+      setSlotFormError('Section and room are required.')
+      return
+    }
+
+    if (timeToMinutes(start_time) >= timeToMinutes(end_time)) {
+      setSlotFormError('End time must be after start time.')
+      return
+    }
+
+    const overlap = timetableSlots.find(
+      (s) =>
+        s.id !== editingSlotId &&
+        s.day_of_week === day_of_week &&
+        timeRangesOverlap(`${start_time}:00`, `${end_time}:00`, s.start_time, s.end_time),
+    )
+
+    setSavingSlot(true)
+
+    const payload = {
+      day_of_week,
+      start_time: `${start_time}:00`,
+      end_time: `${end_time}:00`,
+      course_name: courseShortCode(selectedCourse.name),
+      section: section.trim(),
+      room: room.trim(),
+      is_functional,
+      professor_identifier: 'prof_dtai',
+    }
+
+    const { error: saveError } = editingSlotId
+      ? await supabase.from('timetable_slots').update(payload).eq('id', editingSlotId)
+      : await supabase.from('timetable_slots').insert(payload)
+
+    setSavingSlot(false)
+
+    if (saveError) {
+      setSlotFormError(saveError.message)
+      return
+    }
+
+    await loadTimetableSlots(selectedCourse)
+    handleCloseSlotForm()
+
+    setTimetableMessage(
+      overlap
+        ? {
+            type: 'warning',
+            text: `Saved — but this overlaps with ${overlap.section} (${overlap.room}) on ${day_of_week}, ${overlap.start_time.slice(0, 5)}–${overlap.end_time.slice(0, 5)}. That's fine if it's intentional (e.g. two sections in different rooms at once).`,
+          }
+        : { type: 'success', text: editingSlotId ? 'Slot updated.' : 'Slot added.' },
+    )
+  }
+
+  async function handleDeleteSlot() {
+    if (!editingSlotId) return
+
+    const confirmed = window.confirm(
+      "Delete this timetable slot? Sessions already generated from it are unaffected — this only stops it from being included in future generation.",
+    )
+    if (!confirmed) return
+
+    setSavingSlot(true)
+
+    const { error: deleteError } = await supabase.from('timetable_slots').delete().eq('id', editingSlotId)
+
+    setSavingSlot(false)
+
+    if (deleteError) {
+      setSlotFormError(deleteError.message)
+      return
+    }
+
+    await loadTimetableSlots(selectedCourse)
+    handleCloseSlotForm()
+    setTimetableMessage({ type: 'success', text: 'Slot deleted.' })
+  }
+
+  const functionalSlots = timetableSlots.filter((s) => s.is_functional)
   const slotDays = [...new Set(functionalSlots.map((s) => s.day_of_week))].sort(
     (a, b) => DAY_ORDER.indexOf(a) - DAY_ORDER.indexOf(b),
   )
@@ -445,6 +598,106 @@ export default function Admin() {
       </div>
 
       <div className="mt-6 rounded-xl bg-white p-6 shadow-sm sm:p-8">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h2 className="text-base font-semibold text-gray-900">
+              Weekly Timetable {slotsLoading ? '' : `(${timetableSlots.length})`}
+            </h2>
+            <p className="mt-1 text-sm text-gray-500">
+              Recurring weekly slots for <strong>{selectedCourse.name}</strong>. Functional slots
+              generate real QR/scan sessions; placeholder slots are schedule-only.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={handleOpenAddSlot}
+            className="shrink-0 rounded-lg bg-maroon-600 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-maroon-700"
+          >
+            Add Slot
+          </button>
+        </div>
+
+        {timetableMessage && (
+          <p
+            role="alert"
+            className={`mt-4 rounded-lg px-3.5 py-2.5 text-sm ${
+              timetableMessage.type === 'error'
+                ? 'bg-red-50 text-red-700'
+                : timetableMessage.type === 'warning'
+                  ? 'bg-amber-50 text-amber-700'
+                  : 'bg-green-50 text-green-700'
+            }`}
+          >
+            {timetableMessage.text}
+          </p>
+        )}
+
+        {slotFormOpen && (
+          <SlotForm
+            form={slotForm}
+            onChange={setSlotForm}
+            isEditing={editingSlotId !== null}
+            onSave={handleSaveSlot}
+            onDelete={handleDeleteSlot}
+            onCancel={handleCloseSlotForm}
+            saving={savingSlot}
+            error={slotFormError}
+          />
+        )}
+
+        <div className="mt-4 overflow-x-auto">
+          {slotsLoading ? (
+            <p className="text-sm text-gray-500">Loading…</p>
+          ) : slotsError ? (
+            <p role="alert" className="text-sm text-red-700">
+              {slotsError}
+            </p>
+          ) : timetableSlots.length === 0 ? (
+            <p className="text-sm text-gray-400">No timetable slots configured for this course yet.</p>
+          ) : (
+            <table className="w-full text-left text-sm">
+              <thead>
+                <tr className="border-b border-gray-100 text-xs font-medium tracking-wide text-gray-500 uppercase">
+                  <th className="px-4 py-2.5">Day</th>
+                  <th className="px-4 py-2.5">Time</th>
+                  <th className="px-4 py-2.5">Section</th>
+                  <th className="px-4 py-2.5">Room</th>
+                  <th className="px-4 py-2.5">Type</th>
+                </tr>
+              </thead>
+              <tbody>
+                {timetableSlots.map((slot, i) => (
+                  <tr
+                    key={slot.id}
+                    onClick={() => handleOpenEditSlot(slot)}
+                    className={`cursor-pointer transition hover:bg-maroon-50 ${
+                      i % 2 === 0 ? 'bg-white' : 'bg-gray-50'
+                    }`}
+                  >
+                    <td className="px-4 py-2.5 font-medium text-gray-900">{slot.day_of_week}</td>
+                    <td className="px-4 py-2.5 tabular-nums text-gray-600">
+                      {slot.start_time.slice(0, 5)}–{slot.end_time.slice(0, 5)}
+                    </td>
+                    <td className="px-4 py-2.5 text-gray-600">{slot.section}</td>
+                    <td className="px-4 py-2.5 text-gray-600">{slot.room}</td>
+                    <td className="px-4 py-2.5">
+                      <span
+                        className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${
+                          slot.is_functional ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-600'
+                        }`}
+                      >
+                        {slot.is_functional ? 'Functional' : 'Placeholder'}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      </div>
+
+      <div className="mt-6 rounded-xl bg-white p-6 shadow-sm sm:p-8">
         <h2 className="text-base font-semibold text-gray-900">Generate Upcoming Sessions</h2>
         <p className="mt-1 text-sm text-gray-500">
           Session {maxSessionNumber} of {selectedCourse.total_sessions} planned
@@ -576,6 +829,141 @@ export default function Admin() {
         )}
       </div>
     </PageShell>
+  )
+}
+
+function SlotForm({ form, onChange, isEditing, onSave, onDelete, onCancel, saving, error }) {
+  function setField(field, value) {
+    onChange({ ...form, [field]: value })
+  }
+
+  return (
+    <div className="mt-4 rounded-lg border border-gray-200 bg-gray-50 p-5">
+      <h3 className="text-sm font-semibold text-gray-900">{isEditing ? 'Edit Slot' : 'Add Slot'}</h3>
+
+      <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <div>
+          <label className="text-sm font-medium text-gray-700">Day of week</label>
+          <select
+            value={form.day_of_week}
+            onChange={(e) => setField('day_of_week', e.target.value)}
+            className="mt-1 w-full rounded-lg border border-gray-300 px-3.5 py-2.5 text-gray-900 outline-none transition focus:border-maroon-600 focus:ring-2 focus:ring-maroon-100"
+          >
+            {DAY_ORDER.map((d) => (
+              <option key={d} value={d}>
+                {d}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="flex gap-3">
+          <div className="flex-1">
+            <label className="text-sm font-medium text-gray-700">Start time</label>
+            <input
+              type="time"
+              value={form.start_time}
+              onChange={(e) => setField('start_time', e.target.value)}
+              className="mt-1 w-full rounded-lg border border-gray-300 px-3.5 py-2.5 text-gray-900 outline-none transition focus:border-maroon-600 focus:ring-2 focus:ring-maroon-100"
+            />
+          </div>
+          <div className="flex-1">
+            <label className="text-sm font-medium text-gray-700">End time</label>
+            <input
+              type="time"
+              value={form.end_time}
+              onChange={(e) => setField('end_time', e.target.value)}
+              className="mt-1 w-full rounded-lg border border-gray-300 px-3.5 py-2.5 text-gray-900 outline-none transition focus:border-maroon-600 focus:ring-2 focus:ring-maroon-100"
+            />
+          </div>
+        </div>
+
+        <div>
+          <label className="text-sm font-medium text-gray-700">Section</label>
+          <input
+            type="text"
+            value={form.section}
+            onChange={(e) => setField('section', e.target.value)}
+            placeholder="e.g. Sec A"
+            className="mt-1 w-full rounded-lg border border-gray-300 px-3.5 py-2.5 text-gray-900 outline-none transition focus:border-maroon-600 focus:ring-2 focus:ring-maroon-100"
+          />
+        </div>
+
+        <div>
+          <label className="text-sm font-medium text-gray-700">Room</label>
+          <input
+            type="text"
+            value={form.room}
+            onChange={(e) => setField('room', e.target.value)}
+            placeholder="e.g. CR-107"
+            className="mt-1 w-full rounded-lg border border-gray-300 px-3.5 py-2.5 text-gray-900 outline-none transition focus:border-maroon-600 focus:ring-2 focus:ring-maroon-100"
+          />
+        </div>
+      </div>
+
+      <label className="mt-4 flex cursor-pointer items-start justify-between gap-4 rounded-lg bg-white p-3.5">
+        <span>
+          <span className="block text-sm font-medium text-gray-700">
+            Enable real QR/scan attendance for this slot
+          </span>
+          <span className="block text-xs text-gray-400">
+            {form.is_functional
+              ? 'Sessions generated from this slot will run live QR attendance.'
+              : 'Show as schedule only — no sessions will be generated from this slot.'}
+          </span>
+        </span>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={form.is_functional}
+          onClick={() => setField('is_functional', !form.is_functional)}
+          className={`relative h-6 w-11 shrink-0 rounded-full transition ${
+            form.is_functional ? 'bg-maroon-600' : 'bg-gray-300'
+          }`}
+        >
+          <span
+            className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${
+              form.is_functional ? 'translate-x-5' : 'translate-x-0.5'
+            }`}
+          />
+        </button>
+      </label>
+
+      {error && (
+        <p role="alert" className="mt-3 rounded-lg bg-red-50 px-3.5 py-2.5 text-sm text-red-700">
+          {error}
+        </p>
+      )}
+
+      <div className="mt-4 flex flex-wrap items-center gap-3">
+        <button
+          type="button"
+          onClick={onSave}
+          disabled={saving}
+          className="rounded-lg bg-maroon-600 px-6 py-2.5 text-sm font-medium text-white transition hover:bg-maroon-700 disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          {saving ? 'Saving…' : isEditing ? 'Save Changes' : 'Add Slot'}
+        </button>
+        {isEditing && (
+          <button
+            type="button"
+            onClick={onDelete}
+            disabled={saving}
+            className="rounded-lg border border-red-300 px-6 py-2.5 text-sm font-medium text-red-700 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            Delete Slot
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={onCancel}
+          disabled={saving}
+          className="rounded-lg px-6 py-2.5 text-sm font-medium text-gray-600 transition hover:bg-gray-100"
+        >
+          Cancel
+        </button>
+      </div>
+    </div>
   )
 }
 

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { ArrowLeft } from 'lucide-react'
 import { QRCodeSVG } from 'qrcode.react'
@@ -14,6 +14,17 @@ const TIMING_OPTIONS = [
 ]
 
 const MID_CLASS_WINDOW_MS = 60000
+
+// Best-effort client-side safety net for sessions a professor forgets to end. There is no
+// server-side scheduled job in this architecture (no backend beyond Supabase + this SPA),
+// so this can only fire while a professor's own browser tab still has this page open — if
+// they close the laptop, nothing here runs and the session stays open indefinitely. A real
+// production version would enforce this server-side (e.g. a Supabase Edge Function on a
+// pg_cron schedule) so it applies even with no browser involved at all. Be honest about this
+// limitation if asked — it is a mitigation, not a guarantee.
+const STALE_WARNING_MS = 2 * 60 * 60 * 1000 // 2 hours
+const STALE_CUTOFF_MS = 3 * 60 * 60 * 1000 // 3 hours
+const STALE_CHECK_INTERVAL_MS = 30 * 1000
 
 function generateToken() {
   return Math.random().toString(36).substring(2, 10)
@@ -65,6 +76,10 @@ export default function ProfessorLive() {
   const [exportError, setExportError] = useState('')
   const [switchingManual, setSwitchingManual] = useState(false)
   const [switchError, setSwitchError] = useState('')
+  const [staleWarning, setStaleWarning] = useState(false)
+  const [endingStale, setEndingStale] = useState(false)
+  const [staleError, setStaleError] = useState('')
+  const autoEndTriggeredRef = useRef(false)
 
   useEffect(() => {
     async function loadSession() {
@@ -74,7 +89,7 @@ export default function ProfessorLive() {
       const { data: sessionRow, error: sessionError } = await supabase
         .from('sessions')
         .select(
-          'id, course_id, session_number, session_date, status, qr_duration_seconds, timing_config, mid_class_enabled, current_phase, mid_class_window_expires_at',
+          'id, course_id, session_number, session_date, status, qr_duration_seconds, timing_config, mid_class_enabled, current_phase, mid_class_window_expires_at, qr_started_at',
         )
         .eq('id', sessionId)
         .maybeSingle()
@@ -230,6 +245,75 @@ export default function ProfessorLive() {
       supabase.removeChannel(channel)
     }
   }, [session?.status, session?.id])
+
+  // Stale-session watchdog — see the STALE_* constants above for the architectural caveat.
+  // qr_started_at is stamped whenever a phase actually goes live (goLive) and is left
+  // untouched by the switch-to-manual-mode fallback, so it doubles as "how long has the
+  // current phase been open" for qr_live and manual_only alike. For awaiting_end, it still
+  // refers to when the *previous* (start) phase opened — there's no separate timestamp for
+  // "entered awaiting_end", but if a professor hasn't returned to open the end round in
+  // 2-3+ hours since the start round began, that's just as clearly forgotten.
+  useEffect(() => {
+    const isOpenLiveState =
+      session?.status === 'qr_live' ||
+      session?.status === 'manual_only' ||
+      (session?.status === 'awaiting_end' && session?.current_phase != null)
+
+    if (!isOpenLiveState || !session?.qr_started_at) {
+      setStaleWarning(false)
+      return
+    }
+
+    autoEndTriggeredRef.current = false
+    const openedAtMs = new Date(session.qr_started_at).getTime()
+
+    function checkStaleness() {
+      const elapsedMs = Date.now() - openedAtMs
+
+      if (elapsedMs >= STALE_CUTOFF_MS) {
+        if (!autoEndTriggeredRef.current) {
+          autoEndTriggeredRef.current = true
+          handleForceEndStaleSession()
+        }
+        return
+      }
+
+      setStaleWarning(elapsedMs >= STALE_WARNING_MS)
+    }
+
+    checkStaleness()
+    const staleCheckTimer = setInterval(checkStaleness, STALE_CHECK_INTERVAL_MS)
+
+    return () => clearInterval(staleCheckTimer)
+  }, [session?.status, session?.current_phase, session?.qr_started_at, session?.id])
+
+  // Deliberately distinct from handleEndSession: that function's both-timing branch can
+  // route back into 'awaiting_end' (the normal handoff to a second round), which would be a
+  // no-op for a session that's already stuck in awaiting_end — defeating the point of a hard
+  // cutoff. A session flagged as forgotten always closes outright, regardless of phase.
+  async function handleForceEndStaleSession() {
+    setEndingStale(true)
+    setStaleError('')
+
+    await resolvePendingMidClassVerification()
+
+    const { data, error: updateError } = await supabase
+      .from('sessions')
+      .update({ status: 'ended' })
+      .eq('id', session.id)
+      .select()
+      .single()
+
+    setEndingStale(false)
+
+    if (updateError) {
+      setStaleError(updateError.message)
+      return
+    }
+
+    setStaleWarning(false)
+    setSession(data)
+  }
 
   async function goLive(phase, extraFields = {}) {
     setStarting(true)
@@ -488,6 +572,27 @@ export default function ProfessorLive() {
           <ArrowLeft className="h-4 w-4" />
           Back to Calendar
         </Link>
+
+        {staleWarning && (
+          <div className="mt-4 flex flex-col items-center gap-3 rounded-lg border-2 border-red-400 bg-red-50 p-4 text-center sm:flex-row sm:justify-between sm:text-left">
+            <p className="text-sm font-semibold text-red-800">
+              This session has been open for over 2 hours — did you forget to end it?
+            </p>
+            <button
+              type="button"
+              onClick={handleForceEndStaleSession}
+              disabled={endingStale}
+              className="shrink-0 rounded-lg bg-red-600 px-5 py-2 text-sm font-medium text-white transition hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {endingStale ? 'Ending…' : 'End Session Now'}
+            </button>
+          </div>
+        )}
+        {staleError && (
+          <p role="alert" className="mt-2 rounded-lg bg-red-50 px-3.5 py-2.5 text-sm text-red-700">
+            {staleError}
+          </p>
+        )}
 
         <div className="mt-4 flex items-start justify-between gap-4">
           <div>

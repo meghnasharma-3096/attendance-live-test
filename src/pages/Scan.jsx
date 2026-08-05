@@ -182,6 +182,41 @@ export default function Scan() {
         return
       }
 
+      // Best-effort device-usage ledger for the "Shared Device Usage" anomaly check — QR-scan
+      // only (manual entries never reach this code path, since they're inserted directly by
+      // the professor's Manual Override, not through this file). There's no server-side RPC
+      // layer in this app for a true atomic ON CONFLICT increment, so this is a read-then-write;
+      // a failure here shouldn't block the student from being marked present, so it's logged,
+      // not surfaced.
+      const { data: existingHistory, error: historyReadError } = await supabase
+        .from('device_history')
+        .select('id, times_seen')
+        .eq('student_pgp_id', user.student_pgp_id)
+        .eq('device_fingerprint', deviceFingerprint)
+        .maybeSingle()
+
+      if (historyReadError) {
+        console.error('Failed to read device_history:', historyReadError.message)
+      } else {
+        const nowIso = new Date().toISOString()
+        const { error: historyWriteError } = existingHistory
+          ? await supabase
+              .from('device_history')
+              .update({ times_seen: existingHistory.times_seen + 1, last_seen_at: nowIso })
+              .eq('id', existingHistory.id)
+          : await supabase.from('device_history').insert({
+              student_pgp_id: user.student_pgp_id,
+              device_fingerprint: deviceFingerprint,
+              first_seen_at: nowIso,
+              last_seen_at: nowIso,
+              times_seen: 1,
+            })
+
+        if (historyWriteError) {
+          console.error('Failed to update device_history:', historyWriteError.message)
+        }
+      }
+
       const { error: insertError } = await supabase.from('attendance_records').insert({
         session_id: session.id,
         student_pgp_id: user.student_pgp_id,

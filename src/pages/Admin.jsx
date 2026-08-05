@@ -1,4 +1,19 @@
 import { Fragment, useEffect, useState } from 'react'
+import {
+  Bar,
+  BarChart,
+  CartesianGrid,
+  Cell,
+  Legend,
+  Line,
+  LineChart,
+  Pie,
+  PieChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from 'recharts'
 import { useAuth } from '../context/AuthContext.jsx'
 import { supabase } from '../lib/supabaseClient.js'
 import {
@@ -9,6 +24,14 @@ import {
 } from '../lib/dateFormat.js'
 import { courseShortCode, downloadCsv, rowsToCsv } from '../lib/csv.js'
 import UserMenu from '../components/UserMenu.jsx'
+
+const DISTRIBUTION_BAND_COLORS = {
+  '90-100%': '#22c55e',
+  '75-89%': '#f59e0b',
+  '50-74%': '#f97316',
+  'Below 50%': '#ef4444',
+}
+const METHOD_COLORS = { 'QR Scan': '#7a1e2b', 'Manual Entry': '#f59e0b' }
 
 const DAY_ORDER = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 
@@ -109,6 +132,12 @@ export default function Admin() {
   const [cancelling, setCancelling] = useState(false)
   const [cancelError, setCancelError] = useState('')
 
+  const [analyticsLoading, setAnalyticsLoading] = useState(true)
+  const [analyticsError, setAnalyticsError] = useState('')
+  const [attendanceOverTime, setAttendanceOverTime] = useState([])
+  const [distributionData, setDistributionData] = useState([])
+  const [methodBreakdown, setMethodBreakdown] = useState([])
+
   const selectedCourse = courses.find((c) => c.id === selectedCourseId) ?? null
 
   useEffect(() => {
@@ -189,7 +218,100 @@ export default function Admin() {
     loadSessions()
     loadTimetableSlots(selectedCourse)
     loadEnrolledStudents(selectedCourse)
+    loadAnalytics(selectedCourse)
   }, [selectedCourse?.id])
+
+  async function loadAnalytics(course) {
+    setAnalyticsLoading(true)
+    setAnalyticsError('')
+
+    const [sessionsRes, enrollRes] = await Promise.all([
+      supabase.from('sessions').select('id, session_number, status').eq('course_id', course.id).order('session_number'),
+      supabase.from('enrollments').select('student_pgp_id').eq('course_id', course.id),
+    ])
+
+    if (sessionsRes.error) {
+      setAnalyticsError(sessionsRes.error.message)
+      setAnalyticsLoading(false)
+      return
+    }
+    if (enrollRes.error) {
+      setAnalyticsError(enrollRes.error.message)
+      setAnalyticsLoading(false)
+      return
+    }
+
+    // Same "conducted" definition used for the attendance-percentage fix elsewhere:
+    // not_started and cancelled sessions never happened, so they can't have an attendance rate.
+    const conductedSessions = (sessionsRes.data ?? []).filter(
+      (s) => s.status !== 'not_started' && s.status !== 'cancelled',
+    )
+    const enrolledPgpIds = (enrollRes.data ?? []).map((e) => e.student_pgp_id)
+    const enrolledSet = new Set(enrolledPgpIds)
+    const sessionIds = conductedSessions.map((s) => s.id)
+
+    let attendanceRows = []
+    if (sessionIds.length > 0) {
+      const { data, error: attendanceErr } = await supabase
+        .from('attendance_records')
+        .select('student_pgp_id, session_id, method')
+        .in('session_id', sessionIds)
+
+      if (attendanceErr) {
+        setAnalyticsError(attendanceErr.message)
+        setAnalyticsLoading(false)
+        return
+      }
+      // Scope to currently-enrolled students only, so a student later removed from the
+      // roster doesn't leave phantom data skewing these course-level charts.
+      attendanceRows = (data ?? []).filter((r) => enrolledSet.has(r.student_pgp_id))
+    }
+
+    const countBySession = new Map()
+    for (const row of attendanceRows) {
+      countBySession.set(row.session_id, (countBySession.get(row.session_id) ?? 0) + 1)
+    }
+    const enrolledCount = enrolledPgpIds.length
+    setAttendanceOverTime(
+      conductedSessions.map((s) => ({
+        session: `S${s.session_number}`,
+        rate:
+          enrolledCount > 0
+            ? Math.round(((countBySession.get(s.id) ?? 0) / enrolledCount) * 1000) / 10
+            : 0,
+      })),
+    )
+
+    const presentCountByStudent = new Map()
+    for (const row of attendanceRows) {
+      presentCountByStudent.set(row.student_pgp_id, (presentCountByStudent.get(row.student_pgp_id) ?? 0) + 1)
+    }
+    const totalConducted = conductedSessions.length
+    const bands = { '90-100%': 0, '75-89%': 0, '50-74%': 0, 'Below 50%': 0 }
+    for (const pgpId of enrolledPgpIds) {
+      const pct = totalConducted > 0 ? ((presentCountByStudent.get(pgpId) ?? 0) / totalConducted) * 100 : 0
+      if (pct >= 90) bands['90-100%'] += 1
+      else if (pct >= 75) bands['75-89%'] += 1
+      else if (pct >= 50) bands['50-74%'] += 1
+      else bands['Below 50%'] += 1
+    }
+    setDistributionData(Object.entries(bands).map(([band, count]) => ({ band, count })))
+
+    let qrCount = 0
+    let manualCount = 0
+    for (const row of attendanceRows) {
+      if (row.method === 'qr_scan') qrCount += 1
+      else if (row.method === 'manual_entry') manualCount += 1
+    }
+    setMethodBreakdown(
+      [
+        { name: 'QR Scan', value: qrCount },
+        { name: 'Manual Entry', value: manualCount },
+      ].filter((d) => d.value > 0),
+    )
+
+    setAnalyticsLoading(false)
+  }
 
   function handleOpenCancelForm(session) {
     setCancellingSessionNumber(session.session_number)
@@ -1224,6 +1346,85 @@ export default function Admin() {
                 })}
               </tbody>
             </table>
+          </div>
+        )}
+      </div>
+
+      <div className="mt-6 rounded-xl bg-white p-6 shadow-sm sm:p-8">
+        <h2 className="text-base font-semibold text-gray-900">Analytics</h2>
+        <p className="mt-1 text-sm text-gray-500">
+          A quick glance at attendance trends for <strong>{selectedCourse.name}</strong>.
+        </p>
+
+        {analyticsLoading ? (
+          <p className="mt-4 text-sm text-gray-500">Loading…</p>
+        ) : analyticsError ? (
+          <p role="alert" className="mt-4 rounded-lg bg-red-50 px-3.5 py-2.5 text-sm text-red-700">
+            {analyticsError}
+          </p>
+        ) : attendanceOverTime.length === 0 ? (
+          <p className="mt-4 text-sm text-gray-400">No conducted sessions yet to analyze.</p>
+        ) : (
+          <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-2">
+            <div className="rounded-lg border border-gray-100 p-4">
+              <h3 className="text-sm font-semibold text-gray-900">Attendance Rate Over Time</h3>
+              <p className="mt-0.5 text-xs text-gray-400">
+                % of enrolled students present, per conducted session.
+              </p>
+              <div className="mt-3 h-56">
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart data={attendanceOverTime}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#f3f4f6" />
+                    <XAxis dataKey="session" tick={{ fontSize: 11 }} />
+                    <YAxis domain={[0, 100]} tick={{ fontSize: 11 }} unit="%" />
+                    <Tooltip formatter={(value) => `${value}%`} />
+                    <Line type="monotone" dataKey="rate" stroke="#7a1e2b" strokeWidth={2} dot={{ r: 3 }} />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+
+            <div className="rounded-lg border border-gray-100 p-4">
+              <h3 className="text-sm font-semibold text-gray-900">Per-Student Attendance Distribution</h3>
+              <p className="mt-0.5 text-xs text-gray-400">
+                How many enrolled students fall into each attendance band.
+              </p>
+              <div className="mt-3 h-56">
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={distributionData}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#f3f4f6" />
+                    <XAxis dataKey="band" tick={{ fontSize: 10 }} />
+                    <YAxis allowDecimals={false} tick={{ fontSize: 11 }} />
+                    <Tooltip />
+                    <Bar dataKey="count" radius={[4, 4, 0, 0]}>
+                      {distributionData.map((entry) => (
+                        <Cell key={entry.band} fill={DISTRIBUTION_BAND_COLORS[entry.band]} />
+                      ))}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+
+            <div className="rounded-lg border border-gray-100 p-4 lg:col-span-2">
+              <h3 className="text-sm font-semibold text-gray-900">Verification Method Breakdown</h3>
+              <p className="mt-0.5 text-xs text-gray-400">
+                QR scan (device/location-verified) vs. manual entry (no-device fallback).
+              </p>
+              <div className="mt-3 h-56">
+                <ResponsiveContainer width="100%" height="100%">
+                  <PieChart>
+                    <Pie data={methodBreakdown} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={70} label>
+                      {methodBreakdown.map((entry) => (
+                        <Cell key={entry.name} fill={METHOD_COLORS[entry.name]} />
+                      ))}
+                    </Pie>
+                    <Tooltip />
+                    <Legend />
+                  </PieChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
           </div>
         )}
       </div>

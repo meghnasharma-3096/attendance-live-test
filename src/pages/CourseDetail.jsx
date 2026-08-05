@@ -36,6 +36,11 @@ export default function CourseDetail() {
   const [scannerOpen, setScannerOpen] = useState(false)
   const [scanError, setScanError] = useState('')
 
+  const [appealOpenRecordId, setAppealOpenRecordId] = useState(null)
+  const [appealNoteInput, setAppealNoteInput] = useState('')
+  const [submittingAppeal, setSubmittingAppeal] = useState(false)
+  const [appealError, setAppealError] = useState('')
+
   useEffect(() => {
     if (!user?.student_pgp_id) return
 
@@ -76,12 +81,12 @@ export default function CourseDetail() {
       }
 
       const sessionIds = (sessionsData ?? []).map((s) => s.id)
-      let attendedIds = new Set()
+      let attendanceBySession = new Map()
 
       if (sessionIds.length > 0) {
         const { data: attendanceData, error: attendanceError } = await supabase
           .from('attendance_records')
-          .select('session_id')
+          .select('id, session_id, flagged, flag_reason, appeal_status, appeal_note, professor_response')
           .eq('student_pgp_id', user.student_pgp_id)
           .in('session_id', sessionIds)
 
@@ -91,17 +96,21 @@ export default function CourseDetail() {
           return
         }
 
-        attendedIds = new Set(attendanceData.map((r) => r.session_id))
+        attendanceBySession = new Map(attendanceData.map((r) => [r.session_id, r]))
       }
 
-      const rows = (sessionsData ?? []).map((s) => ({
-        id: s.id,
-        session_number: s.session_number,
-        session_date: s.session_date,
-        status: s.status,
-        cancellation_reason: s.cancellation_reason,
-        attended: attendedIds.has(s.id),
-      }))
+      const rows = (sessionsData ?? []).map((s) => {
+        const record = attendanceBySession.get(s.id) ?? null
+        return {
+          id: s.id,
+          session_number: s.session_number,
+          session_date: s.session_date,
+          status: s.status,
+          cancellation_reason: s.cancellation_reason,
+          attended: record !== null,
+          attendanceRecord: record,
+        }
+      })
 
       setStudentName(studentRes.data.name)
       setCourse(courseRes.data)
@@ -124,6 +133,51 @@ export default function CourseDetail() {
     }
 
     navigate(`/scan?session=${encodeURIComponent(session)}&token=${encodeURIComponent(token)}`)
+  }
+
+  function handleOpenAppeal(record) {
+    setAppealOpenRecordId(record.id)
+    setAppealNoteInput('')
+    setAppealError('')
+  }
+
+  function handleCloseAppeal() {
+    setAppealOpenRecordId(null)
+    setAppealNoteInput('')
+    setAppealError('')
+  }
+
+  async function handleSubmitAppeal(record) {
+    if (!appealNoteInput.trim()) {
+      setAppealError('Please explain why you think this was flagged incorrectly.')
+      return
+    }
+
+    setSubmittingAppeal(true)
+    setAppealError('')
+
+    const { data, error: updateError } = await supabase
+      .from('attendance_records')
+      .update({ appeal_status: 'pending', appeal_note: appealNoteInput.trim() })
+      .eq('id', record.id)
+      .select('id, appeal_status, appeal_note, professor_response')
+      .single()
+
+    setSubmittingAppeal(false)
+
+    if (updateError) {
+      setAppealError(updateError.message)
+      return
+    }
+
+    setSessionRows((prev) =>
+      prev.map((row) =>
+        row.attendanceRecord?.id === record.id
+          ? { ...row, attendanceRecord: { ...row.attendanceRecord, ...data } }
+          : row,
+      ),
+    )
+    handleCloseAppeal()
   }
 
   if (loading) {
@@ -223,15 +277,89 @@ export default function CourseDetail() {
                         Cancelled{row.cancellation_reason ? ` (${row.cancellation_reason})` : ''}
                       </span>
                     ) : (
-                      <span
-                        className={
-                          row.attended
-                            ? 'inline-flex rounded-full bg-green-100 px-2.5 py-1 text-xs font-medium text-green-700'
-                            : 'inline-flex rounded-full bg-red-100 px-2.5 py-1 text-xs font-medium text-red-700'
-                        }
-                      >
-                        {row.attended ? 'Present' : 'Absent'}
-                      </span>
+                      <>
+                        <span
+                          className={
+                            row.attended
+                              ? 'inline-flex rounded-full bg-green-100 px-2.5 py-1 text-xs font-medium text-green-700'
+                              : 'inline-flex rounded-full bg-red-100 px-2.5 py-1 text-xs font-medium text-red-700'
+                          }
+                        >
+                          {row.attended ? 'Present' : 'Absent'}
+                        </span>
+
+                        {(row.attendanceRecord?.flagged || row.attendanceRecord?.appeal_status) && (
+                          <div className="mt-1.5">
+                            {row.attendanceRecord.flagged &&
+                              row.attendanceRecord.appeal_status === null &&
+                              appealOpenRecordId !== row.attendanceRecord.id && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenAppeal(row.attendanceRecord)}
+                                  className="text-xs font-medium text-maroon-600 underline decoration-dotted hover:text-maroon-700"
+                                >
+                                  This looks wrong? Request a review
+                                </button>
+                              )}
+
+                            {row.attendanceRecord.flagged &&
+                              row.attendanceRecord.appeal_status === null &&
+                              appealOpenRecordId === row.attendanceRecord.id && (
+                                <div className="max-w-xs">
+                                  <textarea
+                                    value={appealNoteInput}
+                                    onChange={(e) => setAppealNoteInput(e.target.value)}
+                                    placeholder="e.g. I was in the classroom, GPS was probably inaccurate near the window"
+                                    rows={2}
+                                    className="w-full rounded-lg border border-gray-300 px-2.5 py-1.5 text-xs text-gray-900 outline-none transition focus:border-maroon-600 focus:ring-1 focus:ring-maroon-100"
+                                  />
+                                  {appealError && (
+                                    <p role="alert" className="mt-1 text-xs text-red-600">
+                                      {appealError}
+                                    </p>
+                                  )}
+                                  <div className="mt-1 flex gap-2">
+                                    <button
+                                      type="button"
+                                      onClick={() => handleSubmitAppeal(row.attendanceRecord)}
+                                      disabled={submittingAppeal}
+                                      className="rounded-lg bg-maroon-600 px-3 py-1 text-xs font-medium text-white transition hover:bg-maroon-700 disabled:cursor-not-allowed disabled:opacity-60"
+                                    >
+                                      {submittingAppeal ? 'Submitting…' : 'Submit'}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={handleCloseAppeal}
+                                      disabled={submittingAppeal}
+                                      className="rounded-lg px-3 py-1 text-xs font-medium text-gray-500 transition hover:bg-gray-100"
+                                    >
+                                      Cancel
+                                    </button>
+                                  </div>
+                                </div>
+                              )}
+
+                            {row.attendanceRecord.appeal_status === 'pending' && (
+                              <p className="text-xs text-amber-600">
+                                Review requested — pending professor response
+                              </p>
+                            )}
+
+                            {row.attendanceRecord.appeal_status === 'approved' && (
+                              <p className="text-xs text-green-600">Review approved — flag cleared</p>
+                            )}
+
+                            {row.attendanceRecord.appeal_status === 'denied' && (
+                              <p className="text-xs text-red-600">
+                                Review denied
+                                {row.attendanceRecord.professor_response
+                                  ? `: ${row.attendanceRecord.professor_response}`
+                                  : ''}
+                              </p>
+                            )}
+                          </div>
+                        )}
+                      </>
                     )}
                   </td>
                 </tr>

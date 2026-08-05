@@ -14,6 +14,10 @@ export default function Anomalies() {
   const [sharedDevices, setSharedDevices] = useState([])
   const [flaggedStudents, setFlaggedStudents] = useState([])
   const [unverifiedMidClass, setUnverifiedMidClass] = useState([])
+  const [pendingAppeals, setPendingAppeals] = useState([])
+  const [appealResponseInputs, setAppealResponseInputs] = useState({})
+  const [resolvingAppealId, setResolvingAppealId] = useState(null)
+  const [appealActionError, setAppealActionError] = useState('')
 
   async function runCheck() {
     setRunning(true)
@@ -121,8 +125,59 @@ export default function Anomalies() {
       })),
     )
 
+    const { data: appealRows, error: appealError } = await supabase
+      .from('attendance_records')
+      .select(
+        'id, student_pgp_id, flag_reason, appeal_note, marked_at, students(name), sessions(session_number, courses(name))',
+      )
+      .eq('appeal_status', 'pending')
+      .order('marked_at', { ascending: false })
+
+    if (appealError) {
+      setRunning(false)
+      setError(appealError.message)
+      return
+    }
+
+    setPendingAppeals(
+      (appealRows ?? []).map((row) => ({
+        id: row.id,
+        pgpId: row.student_pgp_id,
+        name: row.students?.name ?? row.student_pgp_id,
+        flagReason: row.flag_reason,
+        appealNote: row.appeal_note,
+        courseName: row.sessions?.courses?.name,
+        sessionNumber: row.sessions?.session_number,
+      })),
+    )
+
     setHasRun(true)
     setRunning(false)
+  }
+
+  async function handleResolveAppeal(record, decision) {
+    setResolvingAppealId(record.id)
+    setAppealActionError('')
+
+    const response = (appealResponseInputs[record.id] ?? '').trim()
+
+    const { error: resolveError } = await supabase
+      .from('attendance_records')
+      .update({
+        appeal_status: decision,
+        professor_response: response || null,
+        ...(decision === 'approved' ? { flagged: false } : {}),
+      })
+      .eq('id', record.id)
+
+    setResolvingAppealId(null)
+
+    if (resolveError) {
+      setAppealActionError(resolveError.message)
+      return
+    }
+
+    setPendingAppeals((prev) => prev.filter((a) => a.id !== record.id))
   }
 
   return (
@@ -229,6 +284,80 @@ export default function Anomalies() {
                     </tbody>
                   </table>
                 </div>
+              </div>
+            )}
+          </div>
+
+          <div className="mt-6">
+            <h2 className="text-base font-semibold text-gray-900">Pending Flag Appeals</h2>
+            <p className="mt-1 text-xs text-gray-400">
+              Across all courses — this account is a single demo professor login with visibility into
+              every seeded course (see ARCHITECTURE_NOTES.md).
+            </p>
+            {appealActionError && (
+              <p role="alert" className="mt-2 rounded-lg bg-red-50 px-3.5 py-2.5 text-sm text-red-700">
+                {appealActionError}
+              </p>
+            )}
+            {pendingAppeals.length === 0 ? (
+              <EmptyState />
+            ) : (
+              <div className="mt-3 space-y-3">
+                {pendingAppeals.map((appeal) => (
+                  <div
+                    key={appeal.id}
+                    className="rounded-xl border-l-4 border-maroon-400 bg-white p-5 shadow-sm"
+                  >
+                    <div className="flex items-start justify-between gap-4">
+                      <div>
+                        <p className="font-medium text-gray-900">{appeal.name}</p>
+                        <p className="text-xs text-gray-500">
+                          {appeal.pgpId}
+                          {appeal.courseName && ` · ${appeal.courseName}`}
+                          {appeal.sessionNumber != null && ` · Session ${appeal.sessionNumber}`}
+                        </p>
+                      </div>
+                    </div>
+
+                    <p className="mt-3 text-sm text-gray-600">
+                      <span className="font-medium text-gray-700">Flag reason:</span>{' '}
+                      {appeal.flagReason}
+                    </p>
+                    <p className="mt-1 text-sm text-gray-600">
+                      <span className="font-medium text-gray-700">Student's note:</span>{' '}
+                      {appeal.appealNote}
+                    </p>
+
+                    <input
+                      type="text"
+                      value={appealResponseInputs[appeal.id] ?? ''}
+                      onChange={(e) =>
+                        setAppealResponseInputs((prev) => ({ ...prev, [appeal.id]: e.target.value }))
+                      }
+                      placeholder="Optional response to the student"
+                      className="mt-3 w-full rounded-lg border border-gray-300 px-3.5 py-2 text-sm text-gray-900 outline-none transition focus:border-maroon-600 focus:ring-2 focus:ring-maroon-100"
+                    />
+
+                    <div className="mt-3 flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => handleResolveAppeal(appeal, 'approved')}
+                        disabled={resolvingAppealId === appeal.id}
+                        className="rounded-lg bg-green-600 px-4 py-1.5 text-sm font-medium text-white transition hover:bg-green-700 disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        {resolvingAppealId === appeal.id ? 'Saving…' : 'Approve'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleResolveAppeal(appeal, 'denied')}
+                        disabled={resolvingAppealId === appeal.id}
+                        className="rounded-lg border border-red-300 px-4 py-1.5 text-sm font-medium text-red-700 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        {resolvingAppealId === appeal.id ? 'Saving…' : 'Deny'}
+                      </button>
+                    </div>
+                  </div>
+                ))}
               </div>
             )}
           </div>

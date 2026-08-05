@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useAuth } from '../context/AuthContext.jsx'
 import { supabase } from '../lib/supabaseClient.js'
 import { formatDateIST, getTodayISTDateString } from '../lib/dateFormat.js'
+import { courseShortCode, downloadCsv, rowsToCsv } from '../lib/csv.js'
 import UserMenu from '../components/UserMenu.jsx'
 
 const STATUS_STYLES = {
@@ -41,6 +42,9 @@ export default function Admin() {
   const [durationInput, setDurationInput] = useState('')
   const [savingDuration, setSavingDuration] = useState(false)
   const [saveMessage, setSaveMessage] = useState(null)
+
+  const [exportingCourse, setExportingCourse] = useState(false)
+  const [exportError, setExportError] = useState('')
 
   const selectedCourse = courses.find((c) => c.id === selectedCourseId) ?? null
 
@@ -134,6 +138,78 @@ export default function Admin() {
     setSaveMessage({ type: 'success', text: 'Saved.' })
   }
 
+  async function handleExportCourse() {
+    setExportingCourse(true)
+    setExportError('')
+
+    const [enrollRes, sessionsRes] = await Promise.all([
+      supabase.from('enrollments').select('students(pgp_id, name)').eq('course_id', selectedCourse.id),
+      supabase
+        .from('sessions')
+        .select('id, session_number')
+        .eq('course_id', selectedCourse.id)
+        .order('session_number'),
+    ])
+
+    if (enrollRes.error) {
+      setExportingCourse(false)
+      setExportError(enrollRes.error.message)
+      return
+    }
+    if (sessionsRes.error) {
+      setExportingCourse(false)
+      setExportError(sessionsRes.error.message)
+      return
+    }
+
+    const courseStudents = (enrollRes.data ?? [])
+      .map((e) => e.students)
+      .filter(Boolean)
+      .sort((a, b) => a.name.localeCompare(b.name))
+    const courseSessions = sessionsRes.data ?? []
+    const sessionIds = courseSessions.map((s) => s.id)
+
+    let attendedPairs = new Set()
+    if (sessionIds.length > 0) {
+      const { data: attendanceData, error: attendanceError } = await supabase
+        .from('attendance_records')
+        .select('student_pgp_id, session_id')
+        .in('session_id', sessionIds)
+
+      if (attendanceError) {
+        setExportingCourse(false)
+        setExportError(attendanceError.message)
+        return
+      }
+
+      attendedPairs = new Set(attendanceData.map((r) => `${r.student_pgp_id}::${r.session_id}`))
+    }
+
+    setExportingCourse(false)
+
+    const rows = [
+      [
+        'PGP ID',
+        'Name',
+        ...courseSessions.map((s) => `Session ${s.session_number}`),
+        'Total Present / Total Sessions',
+      ],
+    ]
+
+    for (const student of courseStudents) {
+      let presentCount = 0
+      const cells = courseSessions.map((s) => {
+        const present = attendedPairs.has(`${student.pgp_id}::${s.id}`)
+        if (present) presentCount += 1
+        return present ? 'Present' : 'Absent'
+      })
+      rows.push([student.pgp_id, student.name, ...cells, `${presentCount} / ${courseSessions.length}`])
+    }
+
+    const filename = `${courseShortCode(selectedCourse.name)}_Full_Attendance_${getTodayISTDateString()}.csv`
+    downloadCsv(filename, rowsToCsv(rows))
+  }
+
   if (loading) {
     return (
       <PageShell>
@@ -188,6 +264,22 @@ export default function Admin() {
               {c.name}
             </button>
           ))}
+        </div>
+
+        <div className="mt-4 flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            onClick={handleExportCourse}
+            disabled={exportingCourse}
+            className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-600 transition hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {exportingCourse ? 'Preparing CSV…' : 'Download Full Course Attendance (CSV)'}
+          </button>
+          {exportError && (
+            <p role="alert" className="text-sm text-red-700">
+              {exportError}
+            </p>
+          )}
         </div>
       </Card>
 

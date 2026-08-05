@@ -3,7 +3,8 @@ import { Link, useParams } from 'react-router-dom'
 import { ArrowLeft } from 'lucide-react'
 import { QRCodeSVG } from 'qrcode.react'
 import { supabase } from '../lib/supabaseClient.js'
-import { formatDateIST, getTodayISTDateString } from '../lib/dateFormat.js'
+import { formatDateIST, formatDateTimeIST, getTodayISTDateString } from '../lib/dateFormat.js'
+import { courseShortCode, downloadCsv, rowsToCsv } from '../lib/csv.js'
 import UserMenu from '../components/UserMenu.jsx'
 
 const TIMING_OPTIONS = [
@@ -57,6 +58,8 @@ export default function ProfessorLive() {
   const [isReverification, setIsReverification] = useState(false)
   const [presentCount, setPresentCount] = useState(0)
   const [manuallyMarked, setManuallyMarked] = useState([])
+  const [exporting, setExporting] = useState(false)
+  const [exportError, setExportError] = useState('')
 
   useEffect(() => {
     async function loadSession() {
@@ -272,6 +275,82 @@ export default function ProfessorLive() {
     return goLive('end')
   }
 
+  async function handleExportSession() {
+    setExporting(true)
+    setExportError('')
+
+    const [enrollRes, attendanceRes] = await Promise.all([
+      supabase.from('enrollments').select('students(pgp_id, name)').eq('course_id', course.id),
+      supabase
+        .from('attendance_records')
+        .select('student_pgp_id, method, phase, marked_at, verification_tier, flagged, flag_reason')
+        .eq('session_id', session.id),
+    ])
+
+    setExporting(false)
+
+    if (enrollRes.error) {
+      setExportError(enrollRes.error.message)
+      return
+    }
+    if (attendanceRes.error) {
+      setExportError(attendanceRes.error.message)
+      return
+    }
+
+    const students = (enrollRes.data ?? [])
+      .map((e) => e.students)
+      .filter(Boolean)
+      .sort((a, b) => a.name.localeCompare(b.name))
+
+    const recordsByStudent = new Map()
+    for (const record of attendanceRes.data ?? []) {
+      const list = recordsByStudent.get(record.student_pgp_id) ?? []
+      list.push(record)
+      recordsByStudent.set(record.student_pgp_id, list)
+    }
+
+    const rows = [
+      [
+        'PGP ID',
+        'Name',
+        'Status',
+        'Method',
+        'Phase',
+        'Marked At (IST)',
+        'Verification Tier',
+        'Flagged',
+        'Flag Reason',
+      ],
+    ]
+
+    for (const student of students) {
+      const records = recordsByStudent.get(student.pgp_id) ?? []
+
+      if (records.length === 0) {
+        rows.push([student.pgp_id, student.name, 'Absent', 'none', '', '', '', '', ''])
+        continue
+      }
+
+      for (const record of records) {
+        rows.push([
+          student.pgp_id,
+          student.name,
+          'Present',
+          record.method,
+          record.phase ?? '',
+          record.marked_at ? formatDateTimeIST(record.marked_at) : '',
+          record.verification_tier ?? '',
+          record.flagged ? 'yes' : 'no',
+          record.flag_reason ?? '',
+        ])
+      }
+    }
+
+    const filename = `${courseShortCode(course.name)}_Session${session.session_number}_Attendance_${getTodayISTDateString()}.csv`
+    downloadCsv(filename, rowsToCsv(rows))
+  }
+
   async function handleEndSession() {
     setEnding(true)
     setEndError('')
@@ -346,6 +425,22 @@ export default function ProfessorLive() {
             </Link>
             <UserMenu />
           </div>
+        </div>
+
+        <div className="mt-4 flex flex-wrap items-center gap-3 border-t border-gray-100 pt-4">
+          <button
+            type="button"
+            onClick={handleExportSession}
+            disabled={exporting}
+            className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-600 transition hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {exporting ? 'Preparing CSV…' : 'Download Attendance (CSV)'}
+          </button>
+          {exportError && (
+            <p role="alert" className="text-sm text-red-700">
+              {exportError}
+            </p>
+          )}
         </div>
 
         {session.status === 'not_started' && (

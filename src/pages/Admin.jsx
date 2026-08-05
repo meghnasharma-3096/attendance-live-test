@@ -9,6 +9,7 @@ const STATUS_STYLES = {
   not_started: 'bg-gray-100 text-gray-600',
   qr_live: 'bg-green-100 text-green-700',
   awaiting_end: 'bg-amber-50 text-amber-700',
+  manual_only: 'bg-orange-50 text-orange-700',
   ended: 'bg-blue-50 text-blue-700',
 }
 
@@ -16,6 +17,7 @@ function statusLabel(status) {
   if (status === 'not_started') return 'Not started'
   if (status === 'qr_live') return 'Live now'
   if (status === 'awaiting_end') return 'Awaiting end-of-class'
+  if (status === 'manual_only') return 'Manual mode'
   if (status === 'ended') return 'Ended'
   return status
 }

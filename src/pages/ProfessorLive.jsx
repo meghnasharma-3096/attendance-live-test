@@ -60,6 +60,8 @@ export default function ProfessorLive() {
   const [manuallyMarked, setManuallyMarked] = useState([])
   const [exporting, setExporting] = useState(false)
   const [exportError, setExportError] = useState('')
+  const [switchingManual, setSwitchingManual] = useState(false)
+  const [switchError, setSwitchError] = useState('')
 
   useEffect(() => {
     async function loadSession() {
@@ -171,7 +173,7 @@ export default function ProfessorLive() {
   }
 
   useEffect(() => {
-    if (session?.status !== 'qr_live') return
+    if (session?.status !== 'qr_live' && session?.status !== 'manual_only') return
 
     refreshAttendance()
 
@@ -273,6 +275,32 @@ export default function ProfessorLive() {
 
   function handleOpenEndRound() {
     return goLive('end')
+  }
+
+  async function handleSwitchToManual() {
+    const confirmed = window.confirm(
+      'This will stop the QR code and rely on manual entry only for the rest of this session — continue?',
+    )
+    if (!confirmed) return
+
+    setSwitchingManual(true)
+    setSwitchError('')
+
+    const { data, error: updateError } = await supabase
+      .from('sessions')
+      .update({ status: 'manual_only' })
+      .eq('id', session.id)
+      .select()
+      .single()
+
+    setSwitchingManual(false)
+
+    if (updateError) {
+      setSwitchError(updateError.message)
+      return
+    }
+
+    setSession(data)
   }
 
   async function handleExportSession() {
@@ -546,29 +574,54 @@ export default function ProfessorLive() {
           </div>
         )}
 
-        {session.status === 'qr_live' && (
+        {(session.status === 'qr_live' || session.status === 'manual_only') && (
           <div className="mt-10 flex flex-col items-center gap-8">
-            {isReverification && (
-              <span className="rounded-full bg-amber-100 px-3 py-1 text-xs font-semibold tracking-wide text-amber-700 uppercase">
-                Re-verification check
-              </span>
+            {session.status === 'qr_live' && (
+              <>
+                {isReverification && (
+                  <span className="rounded-full bg-amber-100 px-3 py-1 text-xs font-semibold tracking-wide text-amber-700 uppercase">
+                    Re-verification check
+                  </span>
+                )}
+
+                <div className="flex flex-col items-center gap-8 sm:flex-row sm:items-center sm:justify-center sm:gap-12">
+                  <div className="w-full max-w-[380px] rounded-2xl border-4 border-maroon-600 bg-white p-4 shadow-lg sm:p-8">
+                    <QRCodeSVG
+                      value={buildScanUrl(session.id, token, session.current_phase ?? 'start')}
+                      size={340}
+                      style={{ width: '100%', height: 'auto' }}
+                    />
+                  </div>
+                  <div className="text-center">
+                    <p className="text-sm font-medium tracking-wide text-gray-500 uppercase">
+                      {session.current_phase === 'end' ? 'End-of-class · Refreshes in' : 'Refreshes in'}
+                    </p>
+                    <p className="text-7xl font-bold tabular-nums text-maroon-600">{countdown}s</p>
+                  </div>
+                </div>
+
+                <div className="text-center">
+                  <button
+                    type="button"
+                    onClick={handleSwitchToManual}
+                    disabled={switchingManual}
+                    className="text-xs text-gray-400 underline decoration-dotted transition hover:text-gray-600 disabled:cursor-not-allowed"
+                  >
+                    {switchingManual
+                      ? 'Switching…'
+                      : 'Having trouble with the QR code? Switch to manual mode'}
+                  </button>
+                  {switchError && <p className="mt-1 text-xs text-red-600">{switchError}</p>}
+                </div>
+              </>
             )}
 
-            <div className="flex flex-col items-center gap-8 sm:flex-row sm:items-center sm:justify-center sm:gap-12">
-              <div className="w-full max-w-[380px] rounded-2xl border-4 border-maroon-600 bg-white p-4 shadow-lg sm:p-8">
-                <QRCodeSVG
-                  value={buildScanUrl(session.id, token, session.current_phase ?? 'start')}
-                  size={340}
-                  style={{ width: '100%', height: 'auto' }}
-                />
+            {session.status === 'manual_only' && (
+              <div className="w-full max-w-sm rounded-lg bg-amber-50 px-4 py-3 text-center text-sm text-amber-700">
+                QR code stopped — this session is in manual-only mode. Use Manual Override below to
+                mark attendance for the rest of this session.
               </div>
-              <div className="text-center">
-                <p className="text-sm font-medium tracking-wide text-gray-500 uppercase">
-                  {session.current_phase === 'end' ? 'End-of-class · Refreshes in' : 'Refreshes in'}
-                </p>
-                <p className="text-7xl font-bold tabular-nums text-maroon-600">{countdown}s</p>
-              </div>
-            </div>
+            )}
 
             <div className="w-full rounded-xl bg-maroon-50 px-6 py-10 text-center">
               <p className="text-8xl font-bold tabular-nums text-gray-900">{presentCount}</p>
@@ -594,7 +647,7 @@ export default function ProfessorLive() {
         {session.status === 'ended' && <p className="mt-10 text-gray-500">Session ended.</p>}
       </Card>
 
-      {session.status === 'qr_live' && (
+      {(session.status === 'qr_live' || session.status === 'manual_only') && (
         <ManualOverrideCard
           sessionId={session.id}
           phase={session.current_phase ?? 'start'}

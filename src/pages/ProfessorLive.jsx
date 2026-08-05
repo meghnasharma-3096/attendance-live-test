@@ -34,6 +34,15 @@ function buildScanUrl(sessionId, token, phase) {
   return `${window.location.origin}${window.location.pathname}#/scan?session=${sessionId}&token=${token}&phase=${phase}`
 }
 
+// Never let laptop_network read as identical to phone_gps in a report — the lower-precision
+// tier must stay visually distinct so it isn't mistaken for the higher-confidence GPS check.
+function verificationTierLabel(tier) {
+  if (tier === 'phone_gps') return 'Phone (GPS)'
+  if (tier === 'laptop_network') return 'Laptop (network, lower precision)'
+  if (tier === 'manual') return 'Manual override'
+  return tier ?? ''
+}
+
 function displaySessionDate(session) {
   const todayString = getTodayISTDateString()
   const neverGoneLive = session.status === 'not_started' || (session.status === 'awaiting_end' && !session.current_phase)
@@ -503,7 +512,7 @@ export default function ProfessorLive() {
           record.method,
           record.phase ?? '',
           record.marked_at ? formatDateTimeIST(record.marked_at) : '',
-          record.verification_tier ?? '',
+          verificationTierLabel(record.verification_tier),
           record.flagged ? 'yes' : 'no',
           record.flag_reason ?? '',
         ])

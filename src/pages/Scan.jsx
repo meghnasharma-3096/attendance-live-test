@@ -4,7 +4,14 @@ import FingerprintJS from '@fingerprintjs/fingerprintjs'
 import { useAuth } from '../context/AuthContext.jsx'
 import { supabase } from '../lib/supabaseClient.js'
 
-const GPS_MATCH_RADIUS_METERS = 100
+// A laptop's Wifi-based position reading is typically far less precise than a phone's GPS
+// chip — this threshold on the browser-reported accuracy (meters) is what distinguishes the
+// two tiers, not any real signal about the device itself. See ARCHITECTURE_NOTES.md: browsers
+// have no API for real Wifi SSID/network-proximity checks, so this is a disclosed proxy, not a
+// true network check.
+const PHONE_ACCURACY_THRESHOLD_METERS = 100
+const GPS_MATCH_RADIUS_PHONE_METERS = 100
+const GPS_MATCH_RADIUS_LAPTOP_METERS = 500
 
 function haversineDistanceMeters(lat1, lon1, lat2, lon2) {
   const R = 6371000
@@ -129,19 +136,32 @@ export default function Scan() {
       let gpsLat = null
       let gpsLng = null
       let gpsMatch = false
+      let verificationTier = 'phone_gps'
+      let flagReason = null
       try {
         const position = await getCurrentPosition()
         gpsLat = position.coords.latitude
         gpsLng = position.coords.longitude
+
+        const accuracy = position.coords.accuracy
+        verificationTier = accuracy > PHONE_ACCURACY_THRESHOLD_METERS ? 'laptop_network' : 'phone_gps'
+        const matchRadius =
+          verificationTier === 'laptop_network' ? GPS_MATCH_RADIUS_LAPTOP_METERS : GPS_MATCH_RADIUS_PHONE_METERS
+
         const distance = haversineDistanceMeters(
           gpsLat,
           gpsLng,
           session.reference_lat,
           session.reference_lng,
         )
-        gpsMatch = distance < GPS_MATCH_RADIUS_METERS
+        gpsMatch = distance < matchRadius
       } catch {
+        // Geolocation denied, unsupported, or timed out — more likely on a laptop than a
+        // phone. Matches the existing flag-don't-block philosophy: still let attendance
+        // through, just flagged with an honest reason instead of a real position.
         gpsMatch = false
+        verificationTier = 'laptop_network'
+        flagReason = 'Location unavailable — laptop device, no verifiable position'
       }
 
       const { error: lockError } = await supabase.from('device_locks').insert({
@@ -170,9 +190,9 @@ export default function Scan() {
         gps_lat: gpsLat,
         gps_lng: gpsLng,
         gps_match: gpsMatch,
-        verification_tier: 'phone_gps',
+        verification_tier: verificationTier,
         flagged: !gpsMatch,
-        flag_reason: gpsMatch ? null : 'GPS location did not match classroom',
+        flag_reason: flagReason ?? (gpsMatch ? null : 'GPS location did not match classroom'),
         phase: attendancePhase,
       })
 

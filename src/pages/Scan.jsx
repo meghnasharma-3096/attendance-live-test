@@ -53,7 +53,9 @@ export default function Scan() {
 
       const { data: session, error: sessionError } = await supabase
         .from('sessions')
-        .select('id, session_number, current_token, reference_lat, reference_lng, status')
+        .select(
+          'id, session_number, current_token, reference_lat, reference_lng, status, mid_class_window_expires_at',
+        )
         .eq('id', sessionId)
         .maybeSingle()
 
@@ -79,7 +81,7 @@ export default function Scan() {
 
       const { data: existingRecord, error: existingError } = await supabase
         .from('attendance_records')
-        .select('id')
+        .select('id, mid_class_verified')
         .eq('session_id', session.id)
         .eq('student_pgp_id', user.student_pgp_id)
         .eq('phase', attendancePhase)
@@ -92,6 +94,28 @@ export default function Scan() {
       }
 
       if (existingRecord) {
+        const midClassWindowOpen =
+          session.mid_class_window_expires_at &&
+          new Date(session.mid_class_window_expires_at) > new Date()
+
+        if (midClassWindowOpen && existingRecord.mid_class_verified === null) {
+          setPhase('processing')
+
+          const { error: reverifyError } = await supabase
+            .from('attendance_records')
+            .update({ mid_class_verified: true })
+            .eq('id', existingRecord.id)
+
+          if (reverifyError) {
+            setPhase('error')
+            setMessage(reverifyError.message)
+            return
+          }
+
+          setPhase('reverified')
+          return
+        }
+
         setPhase('already-marked')
         setMessage("You're already marked present for this session.")
         return
@@ -197,6 +221,18 @@ export default function Scan() {
               You're marked present for Session {sessionNumber}
             </h1>
             <p className="text-gray-500">{user.name}</p>
+          </div>
+        )}
+
+        {phase === 'reverified' && (
+          <div className="flex flex-col items-center gap-4 py-6 text-center">
+            <div className="flex h-24 w-24 items-center justify-center rounded-full bg-green-100 text-5xl text-green-700">
+              ✓
+            </div>
+            <h1 className="text-2xl font-bold text-gray-900">Re-verification confirmed</h1>
+            <p className="text-gray-500">
+              Thanks, {user.name} — you're confirmed present for Session {sessionNumber}.
+            </p>
           </div>
         )}
       </Card>

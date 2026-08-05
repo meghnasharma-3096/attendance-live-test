@@ -13,6 +13,8 @@ const TIMING_OPTIONS = [
   { value: 'both', label: 'Both' },
 ]
 
+const MID_CLASS_WINDOW_MS = 60000
+
 function generateToken() {
   return Math.random().toString(36).substring(2, 10)
 }
@@ -72,7 +74,7 @@ export default function ProfessorLive() {
       const { data: sessionRow, error: sessionError } = await supabase
         .from('sessions')
         .select(
-          'id, course_id, session_number, session_date, status, qr_duration_seconds, timing_config, mid_class_enabled, current_phase',
+          'id, course_id, session_number, session_date, status, qr_duration_seconds, timing_config, mid_class_enabled, current_phase, mid_class_window_expires_at',
         )
         .eq('id', sessionId)
         .maybeSingle()
@@ -110,12 +112,12 @@ export default function ProfessorLive() {
     if (session?.status !== 'qr_live') return
 
     const durationSeconds = session.qr_duration_seconds ?? 60
+    const phase = session.current_phase ?? 'start'
 
-    async function rotateToken(isReverify) {
+    async function rotateToken() {
       const newToken = generateToken()
       setToken(newToken)
       setCountdown(durationSeconds)
-      setIsReverification(isReverify)
 
       const { error: tokenError } = await supabase
         .from('sessions')
@@ -127,29 +129,58 @@ export default function ProfessorLive() {
       }
     }
 
-    rotateToken(false)
+    rotateToken()
 
     const countdownTimer = setInterval(() => {
       setCountdown((prev) => {
         if (prev <= 1) {
-          rotateToken(false)
+          rotateToken()
           return durationSeconds
         }
         return prev - 1
       })
     }, 1000)
 
-    let reverifyTimer = null
+    let reverifyTriggerTimer = null
+    let reverifyWindowTimer = null
+
     if (session.mid_class_enabled) {
       const delayMs = (60 + Math.random() * 240) * 1000 // random point between 1 and 5 minutes
-      reverifyTimer = setTimeout(() => rotateToken(true), delayMs)
+
+      reverifyTriggerTimer = setTimeout(async () => {
+        setIsReverification(true)
+        await rotateToken()
+
+        const expiresAt = new Date(Date.now() + MID_CLASS_WINDOW_MS).toISOString()
+        await supabase
+          .from('sessions')
+          .update({ mid_class_window_expires_at: expiresAt })
+          .eq('id', session.id)
+
+        reverifyWindowTimer = setTimeout(async () => {
+          setIsReverification(false)
+
+          await supabase
+            .from('attendance_records')
+            .update({ mid_class_verified: false })
+            .eq('session_id', session.id)
+            .eq('phase', phase)
+            .is('mid_class_verified', null)
+
+          await supabase
+            .from('sessions')
+            .update({ mid_class_window_expires_at: null })
+            .eq('id', session.id)
+        }, MID_CLASS_WINDOW_MS)
+      }, delayMs)
     }
 
     return () => {
       clearInterval(countdownTimer)
-      if (reverifyTimer) clearTimeout(reverifyTimer)
+      if (reverifyTriggerTimer) clearTimeout(reverifyTriggerTimer)
+      if (reverifyWindowTimer) clearTimeout(reverifyWindowTimer)
     }
-  }, [session?.status, session?.id, session?.qr_duration_seconds, session?.mid_class_enabled])
+  }, [session?.status, session?.id, session?.qr_duration_seconds, session?.mid_class_enabled, session?.current_phase])
 
   async function refreshAttendance() {
     const phase = session.current_phase ?? 'start'
@@ -278,6 +309,23 @@ export default function ProfessorLive() {
     return goLive('end')
   }
 
+  // If a mid-class window is still open when the professor ends the session or switches
+  // to manual mode, there's no more chance for students to respond — resolve it now
+  // instead of leaving those records ambiguously null forever. A null window means either
+  // the check never fired or it already resolved naturally, so this is a safe no-op then.
+  async function resolvePendingMidClassVerification() {
+    if (!session.mid_class_window_expires_at) return
+
+    await supabase
+      .from('attendance_records')
+      .update({ mid_class_verified: false })
+      .eq('session_id', session.id)
+      .eq('phase', session.current_phase ?? 'start')
+      .is('mid_class_verified', null)
+
+    await supabase.from('sessions').update({ mid_class_window_expires_at: null }).eq('id', session.id)
+  }
+
   async function handleSwitchToManual() {
     const confirmed = window.confirm(
       'This will stop the QR code and rely on manual entry only for the rest of this session — continue?',
@@ -286,6 +334,8 @@ export default function ProfessorLive() {
 
     setSwitchingManual(true)
     setSwitchError('')
+
+    await resolvePendingMidClassVerification()
 
     const { data, error: updateError } = await supabase
       .from('sessions')
@@ -383,6 +433,8 @@ export default function ProfessorLive() {
   async function handleEndSession() {
     setEnding(true)
     setEndError('')
+
+    await resolvePendingMidClassVerification()
 
     const nextStatus =
       session.timing_config === 'both' && session.current_phase === 'start' ? 'awaiting_end' : 'ended'

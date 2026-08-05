@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { supabase } from '../lib/supabaseClient.js'
+import { formatDateTimeIST } from '../lib/dateFormat.js'
 
 function truncateFingerprint(fingerprint) {
   return fingerprint.length > 12 ? `${fingerprint.slice(0, 12)}…` : fingerprint
@@ -12,6 +13,7 @@ export default function Anomalies() {
   const [error, setError] = useState('')
   const [sharedDevices, setSharedDevices] = useState([])
   const [flaggedStudents, setFlaggedStudents] = useState([])
+  const [unverifiedMidClass, setUnverifiedMidClass] = useState([])
 
   async function runCheck() {
     setRunning(true)
@@ -96,6 +98,27 @@ export default function Anomalies() {
           mostRecentReason: byStudent.get(pgpId).mostRecentReason,
         }))
         .sort((a, b) => b.count - a.count),
+    )
+
+    const { data: unverifiedRows, error: unverifiedError } = await supabase
+      .from('attendance_records')
+      .select('student_pgp_id, marked_at, students(name), sessions(session_number, session_date)')
+      .eq('mid_class_verified', false)
+      .order('marked_at', { ascending: false })
+
+    if (unverifiedError) {
+      setRunning(false)
+      setError(unverifiedError.message)
+      return
+    }
+
+    setUnverifiedMidClass(
+      (unverifiedRows ?? []).map((row) => ({
+        pgpId: row.student_pgp_id,
+        name: row.students?.name ?? row.student_pgp_id,
+        sessionNumber: row.sessions?.session_number,
+        markedAt: row.marked_at,
+      })),
     )
 
     setHasRun(true)
@@ -208,6 +231,49 @@ export default function Anomalies() {
                 </div>
               </div>
             )}
+          </div>
+
+          <div className="mt-6">
+            <h2 className="text-base font-semibold text-gray-900">Present but Unverified Mid-Class</h2>
+            {unverifiedMidClass.length === 0 ? (
+              <EmptyState />
+            ) : (
+              <div className="mt-3 overflow-hidden rounded-xl border-l-4 border-orange-400 bg-white shadow-sm">
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-sm">
+                    <thead>
+                      <tr className="border-b border-gray-100 text-xs font-medium tracking-wide text-gray-500 uppercase">
+                        <th className="px-6 py-3">Student</th>
+                        <th className="px-6 py-3">PGP ID</th>
+                        <th className="px-6 py-3">Session</th>
+                        <th className="px-6 py-3">Marked Present At</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {unverifiedMidClass.map((row, i) => (
+                        <tr
+                          key={`${row.pgpId}-${row.sessionNumber}`}
+                          className={i % 2 === 0 ? 'bg-white' : 'bg-orange-50/40'}
+                        >
+                          <td className="px-6 py-3 font-medium text-gray-900">{row.name}</td>
+                          <td className="px-6 py-3 text-gray-600">{row.pgpId}</td>
+                          <td className="px-6 py-3 text-gray-600">
+                            {row.sessionNumber != null ? `Session ${row.sessionNumber}` : '—'}
+                          </td>
+                          <td className="px-6 py-3 text-gray-600">
+                            {row.markedAt ? formatDateTimeIST(row.markedAt) : '—'}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+            <p className="mt-2 text-xs text-gray-400">
+              Marked present at the start of a session but did not respond to that session's random
+              mid-class re-verification check — a likely "scan and leave" pattern.
+            </p>
           </div>
         </>
       )}

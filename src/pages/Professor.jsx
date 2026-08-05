@@ -6,11 +6,25 @@ import { dateForDayInWeekOf, getTodayISTDateString, getTodayISTDayAbbrev } from 
 import { courseShortCode } from '../lib/csv.js'
 import UserMenu from '../components/UserMenu.jsx'
 
+// This prototype only has one professor login (prof_dtai), which is deliberately given
+// visibility into every seeded course's timetable_slots — standing in for what would be
+// separate per-professor accounts in production, each seeing only their own slots via
+// professor_identifier matching their own login. Since that means this single account's
+// calendar can show other professors' classes too (BDC, SOM), each non-DTAI slot is
+// labeled with its real course/professor so that's visually obvious rather than looking
+// like a data bug. See ARCHITECTURE_NOTES.md for the fuller explanation.
 const PROFESSOR_IDENTIFIER = 'prof_dtai'
 const DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 
 function formatTimeRange(startTime, endTime) {
   return `${startTime.slice(0, 5)}–${endTime.slice(0, 5)}`
+}
+
+function otherCourseLabel(slot, courses) {
+  if (slot.course_name === 'DTAI') return null
+  const course = courses.find((c) => courseShortCode(c.name) === slot.course_name)
+  if (!course) return null
+  return `${slot.course_name} · ${course.professor_name}`
 }
 
 export default function Professor() {
@@ -35,7 +49,7 @@ export default function Professor() {
           .select('id, day_of_week, start_time, end_time, course_name, section, room, is_functional')
           .eq('professor_identifier', PROFESSOR_IDENTIFIER)
           .order('start_time'),
-        supabase.from('courses').select('id, name'),
+        supabase.from('courses').select('id, name, professor_name'),
       ])
 
       if (slotsRes.error) {
@@ -174,6 +188,7 @@ export default function Professor() {
                     >
                       <SlotCardContent
                         slot={slot}
+                        otherLabel={otherCourseLabel(slot, courses)}
                         badge={
                           resolvingSlotId === slot.id && (
                             <span className="shrink-0 text-[10px] font-medium text-gray-400">
@@ -193,6 +208,7 @@ export default function Professor() {
                       <SlotCardContent
                         slot={slot}
                         muted
+                        otherLabel={otherCourseLabel(slot, courses)}
                         badge={
                           <span className="shrink-0 rounded-full bg-gray-200 px-1.5 py-0.5 text-[10px] font-medium text-gray-500">
                             Demo only
@@ -217,7 +233,7 @@ export default function Professor() {
   )
 }
 
-function SlotCardContent({ slot, muted, badge }) {
+function SlotCardContent({ slot, muted, otherLabel, badge }) {
   return (
     <>
       <div className="flex items-center justify-between gap-2">
@@ -229,6 +245,11 @@ function SlotCardContent({ slot, muted, badge }) {
       <p className={`mt-1 text-sm font-semibold ${muted ? 'text-gray-500' : 'text-gray-900'}`}>
         {slot.course_name} · {slot.section}
       </p>
+      {otherLabel && (
+        <p className="mt-0.5 inline-flex rounded-full bg-indigo-50 px-1.5 py-0.5 text-[10px] font-medium text-indigo-600">
+          {otherLabel}
+        </p>
+      )}
       <p className={`text-xs ${muted ? 'text-gray-400' : 'text-gray-500'}`}>{slot.room}</p>
     </>
   )

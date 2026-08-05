@@ -62,7 +62,14 @@ export default function Admin() {
   const [students, setStudents] = useState([])
   const [studentsLoading, setStudentsLoading] = useState(true)
   const [studentsError, setStudentsError] = useState('')
+  const [allStudents, setAllStudents] = useState([])
   const [selectedCourseId, setSelectedCourseId] = useState(null)
+
+  const [manageEnrollmentOpen, setManageEnrollmentOpen] = useState(false)
+  const [enrollSearchText, setEnrollSearchText] = useState('')
+  const [enrollingPgpId, setEnrollingPgpId] = useState(null)
+  const [removingPgpId, setRemovingPgpId] = useState(null)
+  const [enrollmentMessage, setEnrollmentMessage] = useState(null)
 
   const [courseFormOpen, setCourseFormOpen] = useState(false)
   const [courseForm, setCourseForm] = useState(emptyCourseForm())
@@ -104,19 +111,28 @@ export default function Admin() {
       setLoading(true)
       setError('')
 
-      const { data, error: coursesError } = await supabase
-        .from('courses')
-        .select('id, name, professor_name, total_sessions, default_qr_duration_seconds')
-        .order('created_at')
+      const [coursesRes, allStudentsRes] = await Promise.all([
+        supabase
+          .from('courses')
+          .select('id, name, professor_name, total_sessions, default_qr_duration_seconds')
+          .order('created_at'),
+        supabase.from('students').select('pgp_id, name').order('name'),
+      ])
 
-      if (coursesError || !data || data.length === 0) {
-        setError(coursesError?.message ?? 'No courses found')
+      if (coursesRes.error || !coursesRes.data || coursesRes.data.length === 0) {
+        setError(coursesRes.error?.message ?? 'No courses found')
+        setLoading(false)
+        return
+      }
+      if (allStudentsRes.error) {
+        setError(allStudentsRes.error.message)
         setLoading(false)
         return
       }
 
-      setCourses(data)
-      setSelectedCourseId(data[0].id)
+      setCourses(coursesRes.data)
+      setAllStudents(allStudentsRes.data ?? [])
+      setSelectedCourseId(coursesRes.data[0].id)
       setLoading(false)
     }
 
@@ -134,6 +150,9 @@ export default function Admin() {
     setEditingSlotId(null)
     setCourseFormOpen(false)
     setCourseFormError('')
+    setManageEnrollmentOpen(false)
+    setEnrollSearchText('')
+    setEnrollmentMessage(null)
 
     async function loadSessions() {
       setSessionsLoading(true)
@@ -182,6 +201,52 @@ export default function Admin() {
 
     setStudents(enrolled)
     setStudentsLoading(false)
+  }
+
+  async function handleEnrollStudent(student) {
+    setEnrollingPgpId(student.pgp_id)
+    setEnrollmentMessage(null)
+
+    const { error: insertError } = await supabase
+      .from('enrollments')
+      .insert({ course_id: selectedCourse.id, student_pgp_id: student.pgp_id })
+
+    setEnrollingPgpId(null)
+
+    if (insertError) {
+      setEnrollmentMessage({ type: 'error', text: insertError.message })
+      return
+    }
+
+    setEnrollSearchText('')
+    await loadEnrolledStudents(selectedCourse)
+    setEnrollmentMessage({ type: 'success', text: `${student.name} enrolled.` })
+  }
+
+  async function handleRemoveStudent(student) {
+    const confirmed = window.confirm(
+      `Remove ${student.name} from ${selectedCourse.name}? Their existing attendance records for this course will be preserved, but they will no longer appear on the active roster or be able to mark attendance.`,
+    )
+    if (!confirmed) return
+
+    setRemovingPgpId(student.pgp_id)
+    setEnrollmentMessage(null)
+
+    const { error: deleteError } = await supabase
+      .from('enrollments')
+      .delete()
+      .eq('course_id', selectedCourse.id)
+      .eq('student_pgp_id', student.pgp_id)
+
+    setRemovingPgpId(null)
+
+    if (deleteError) {
+      setEnrollmentMessage({ type: 'error', text: deleteError.message })
+      return
+    }
+
+    await loadEnrolledStudents(selectedCourse)
+    setEnrollmentMessage({ type: 'success', text: `${student.name} removed from the roster.` })
   }
 
   async function loadTimetableSlots(course) {
@@ -320,6 +385,18 @@ export default function Admin() {
     handleCloseSlotForm()
     setTimetableMessage({ type: 'success', text: 'Slot deleted.' })
   }
+
+  const enrolledPgpIds = new Set(students.map((s) => s.pgp_id))
+  const filteredUnenrolled =
+    enrollSearchText.trim() === ''
+      ? []
+      : allStudents
+          .filter((s) => !enrolledPgpIds.has(s.pgp_id))
+          .filter((s) => {
+            const q = enrollSearchText.toLowerCase()
+            return s.name.toLowerCase().includes(q) || s.pgp_id.toLowerCase().includes(q)
+          })
+          .slice(0, 8)
 
   const functionalSlots = timetableSlots.filter((s) => s.is_functional)
   const slotDays = [...new Set(functionalSlots.map((s) => s.day_of_week))].sort(
@@ -858,11 +935,75 @@ export default function Admin() {
       </div>
 
       <div className="mt-6 rounded-xl bg-white shadow-sm">
-        <div className="border-b border-gray-100 px-6 py-4">
+        <div className="flex items-center justify-between gap-4 border-b border-gray-100 px-6 py-4">
           <h2 className="text-base font-semibold text-gray-900">
             Course Roster {studentsLoading ? '' : `(${students.length})`}
           </h2>
+          <button
+            type="button"
+            onClick={() => {
+              setManageEnrollmentOpen((v) => !v)
+              setEnrollSearchText('')
+              setEnrollmentMessage(null)
+            }}
+            className="shrink-0 rounded-lg border border-gray-300 px-3 py-1.5 text-sm font-medium text-gray-600 transition hover:bg-gray-50"
+          >
+            {manageEnrollmentOpen ? 'Done' : 'Manage Enrollment'}
+          </button>
         </div>
+
+        {manageEnrollmentOpen && (
+          <div className="border-b border-gray-100 px-6 py-4">
+            <p className="text-sm font-medium text-gray-700">Add a student</p>
+            <div className="relative mt-2">
+              <input
+                type="text"
+                value={enrollSearchText}
+                onChange={(e) => setEnrollSearchText(e.target.value)}
+                placeholder="Search by name or PGP ID…"
+                className="w-full rounded-lg border border-gray-300 px-3.5 py-2.5 text-gray-900 outline-none transition focus:border-maroon-600 focus:ring-2 focus:ring-maroon-100"
+              />
+              {enrollSearchText.trim() && filteredUnenrolled.length > 0 && (
+                <ul className="absolute z-10 mt-1 max-h-56 w-full overflow-y-auto rounded-lg border border-gray-200 bg-white shadow-lg">
+                  {filteredUnenrolled.map((s) => (
+                    <li
+                      key={s.pgp_id}
+                      className="flex items-center justify-between gap-3 px-3.5 py-2 text-sm hover:bg-maroon-50"
+                    >
+                      <span>
+                        <span className="font-medium text-gray-900">{s.name}</span>
+                        <span className="ml-2 text-gray-500">{s.pgp_id}</span>
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => handleEnrollStudent(s)}
+                        disabled={enrollingPgpId === s.pgp_id}
+                        className="shrink-0 rounded-lg bg-maroon-600 px-3 py-1 text-xs font-medium text-white transition hover:bg-maroon-700 disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        {enrollingPgpId === s.pgp_id ? 'Enrolling…' : 'Enroll'}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {enrollSearchText.trim() && filteredUnenrolled.length === 0 && (
+                <p className="mt-2 text-xs text-gray-400">No matching students, or already enrolled.</p>
+              )}
+            </div>
+
+            {enrollmentMessage && (
+              <p
+                role="alert"
+                className={`mt-3 rounded-lg px-3.5 py-2.5 text-sm ${
+                  enrollmentMessage.type === 'error' ? 'bg-red-50 text-red-700' : 'bg-green-50 text-green-700'
+                }`}
+              >
+                {enrollmentMessage.text}
+              </p>
+            )}
+          </div>
+        )}
+
         {studentsLoading ? (
           <p className="px-6 py-4 text-sm text-gray-500">Loading…</p>
         ) : studentsError ? (
@@ -872,9 +1013,11 @@ export default function Admin() {
         ) : students.length === 0 ? (
           <div className="px-6 py-8 text-center">
             <p className="text-sm text-gray-500">No students enrolled yet.</p>
-            <p className="mt-1 text-xs text-gray-400">
-              Enrollment management isn't built yet — new courses start with an empty roster.
-            </p>
+            {!manageEnrollmentOpen && (
+              <p className="mt-1 text-xs text-gray-400">
+                Click "Manage Enrollment" above to add students.
+              </p>
+            )}
           </div>
         ) : (
           <div className="max-h-[28rem] overflow-y-auto">
@@ -883,6 +1026,7 @@ export default function Admin() {
                 <tr className="border-b border-gray-100 text-xs font-medium tracking-wide text-gray-500 uppercase">
                   <th className="px-6 py-3">Name</th>
                   <th className="px-6 py-3">PGP ID</th>
+                  {manageEnrollmentOpen && <th className="px-6 py-3">Action</th>}
                 </tr>
               </thead>
               <tbody>
@@ -890,6 +1034,18 @@ export default function Admin() {
                   <tr key={student.pgp_id} className={i % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
                     <td className="px-6 py-3 font-medium text-gray-900">{student.name}</td>
                     <td className="px-6 py-3 text-gray-600">{student.pgp_id}</td>
+                    {manageEnrollmentOpen && (
+                      <td className="px-6 py-3">
+                        <button
+                          type="button"
+                          onClick={() => handleRemoveStudent(student)}
+                          disabled={removingPgpId === student.pgp_id}
+                          className="rounded-lg border border-red-300 px-3 py-1 text-xs font-medium text-red-700 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          {removingPgpId === student.pgp_id ? 'Removing…' : 'Remove'}
+                        </button>
+                      </td>
+                    )}
                   </tr>
                 ))}
               </tbody>

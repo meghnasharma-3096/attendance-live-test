@@ -65,7 +65,7 @@ export default function CourseDetail() {
 
       const { data: sessionsData, error: sessionsError } = await supabase
         .from('sessions')
-        .select('id, session_number, session_date, status')
+        .select('id, session_number, session_date, status, cancellation_reason')
         .eq('course_id', courseId)
         .order('session_number')
 
@@ -99,6 +99,7 @@ export default function CourseDetail() {
         session_number: s.session_number,
         session_date: s.session_date,
         status: s.status,
+        cancellation_reason: s.cancellation_reason,
         attended: attendedIds.has(s.id),
       }))
 
@@ -147,7 +148,12 @@ export default function CourseDetail() {
     )
   }
 
-  const conductedRows = sessionRows.filter((row) => row.status !== 'not_started')
+  // Cancelled sessions never happened, so they're excluded from the denominator here —
+  // otherwise a holiday or exam-week cancellation would unfairly drag down every
+  // student's attendance percentage.
+  const conductedRows = sessionRows.filter(
+    (row) => row.status !== 'not_started' && row.status !== 'cancelled',
+  )
   const attendedCount = conductedRows.filter((row) => row.attended).length
 
   return (
@@ -211,6 +217,10 @@ export default function CourseDetail() {
                     {row.status === 'not_started' ? (
                       <span className="inline-flex rounded-full bg-gray-100 px-2.5 py-1 text-xs font-medium text-gray-600">
                         Upcoming
+                      </span>
+                    ) : row.status === 'cancelled' ? (
+                      <span className="inline-flex rounded-full bg-gray-100 px-2.5 py-1 text-xs font-medium text-gray-400">
+                        Cancelled{row.cancellation_reason ? ` (${row.cancellation_reason})` : ''}
                       </span>
                     ) : (
                       <span

@@ -89,7 +89,7 @@ export default function ProfessorLive() {
       const { data: sessionRow, error: sessionError } = await supabase
         .from('sessions')
         .select(
-          'id, course_id, session_number, session_date, status, qr_duration_seconds, timing_config, mid_class_enabled, current_phase, mid_class_window_expires_at, qr_started_at',
+          'id, course_id, session_number, session_date, status, qr_duration_seconds, timing_config, mid_class_enabled, current_phase, mid_class_window_expires_at, qr_started_at, cancellation_reason',
         )
         .eq('id', sessionId)
         .maybeSingle()
@@ -803,6 +803,13 @@ export default function ProfessorLive() {
         )}
 
         {session.status === 'ended' && <p className="mt-10 text-gray-500">Session ended.</p>}
+
+        {session.status === 'cancelled' && (
+          <div className="mt-10 rounded-lg bg-gray-100 px-4 py-3 text-center text-sm text-gray-500">
+            This session was cancelled
+            {session.cancellation_reason ? ` — ${session.cancellation_reason}` : ''}.
+          </div>
+        )}
       </Card>
 
       {(session.status === 'qr_live' || session.status === 'manual_only') && (

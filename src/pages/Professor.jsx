@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { useNavigate } from 'react-router-dom'
 import { CalendarDays } from 'lucide-react'
 import { supabase } from '../lib/supabaseClient.js'
-import { getTodayISTDayAbbrev } from '../lib/dateFormat.js'
+import { dateForDayInWeekOf, getTodayISTDateString, getTodayISTDayAbbrev } from '../lib/dateFormat.js'
+import { courseShortCode } from '../lib/csv.js'
 import UserMenu from '../components/UserMenu.jsx'
 
 const PROFESSOR_IDENTIFIER = 'prof_dtai'
@@ -13,36 +14,78 @@ function formatTimeRange(startTime, endTime) {
 }
 
 export default function Professor() {
+  const navigate = useNavigate()
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [slots, setSlots] = useState([])
+  const [courses, setCourses] = useState([])
+  const [resolvingSlotId, setResolvingSlotId] = useState(null)
   const [toast, setToast] = useState('')
 
   const today = getTodayISTDayAbbrev()
 
   useEffect(() => {
-    async function loadSlots() {
+    async function loadData() {
       setLoading(true)
       setError('')
 
-      const { data, error: slotsError } = await supabase
-        .from('timetable_slots')
-        .select('id, day_of_week, start_time, end_time, course_name, section, room, is_functional, linked_session_id')
-        .eq('professor_identifier', PROFESSOR_IDENTIFIER)
-        .order('start_time')
+      const [slotsRes, coursesRes] = await Promise.all([
+        supabase
+          .from('timetable_slots')
+          .select('id, day_of_week, start_time, end_time, course_name, section, room, is_functional')
+          .eq('professor_identifier', PROFESSOR_IDENTIFIER)
+          .order('start_time'),
+        supabase.from('courses').select('id, name'),
+      ])
 
-      if (slotsError) {
-        setError(slotsError.message)
+      if (slotsRes.error) {
+        setError(slotsRes.error.message)
+        setLoading(false)
+        return
+      }
+      if (coursesRes.error) {
+        setError(coursesRes.error.message)
         setLoading(false)
         return
       }
 
-      setSlots(data ?? [])
+      setSlots(slotsRes.data ?? [])
+      setCourses(coursesRes.data ?? [])
       setLoading(false)
     }
 
-    loadSlots()
+    loadData()
   }, [])
+
+  async function handleSlotClick(slot) {
+    setResolvingSlotId(slot.id)
+    setToast('')
+
+    const course = courses.find((c) => courseShortCode(c.name) === slot.course_name)
+    if (!course) {
+      setResolvingSlotId(null)
+      setToast('No matching course found for this class.')
+      return
+    }
+
+    const targetDate = dateForDayInWeekOf(getTodayISTDateString(), slot.day_of_week)
+
+    const { data, error: sessionError } = await supabase
+      .from('sessions')
+      .select('id')
+      .eq('course_id', course.id)
+      .eq('session_date', targetDate)
+      .maybeSingle()
+
+    setResolvingSlotId(null)
+
+    if (sessionError || !data) {
+      setToast('No session has been generated yet for this class this week — ask the admin to generate upcoming sessions.')
+      return
+    }
+
+    navigate(`/professor/live/${data.id}`)
+  }
 
   useEffect(() => {
     if (!toast) return
@@ -122,13 +165,24 @@ export default function Professor() {
 
                 {slotsByDay[day].map((slot) =>
                   slot.is_functional ? (
-                    <Link
+                    <button
                       key={slot.id}
-                      to={`/professor/live/${slot.linked_session_id}`}
-                      className="block cursor-pointer rounded-lg border border-gray-200 bg-white p-3 shadow-sm transition hover:border-maroon-300 hover:shadow-md"
+                      type="button"
+                      onClick={() => handleSlotClick(slot)}
+                      disabled={resolvingSlotId === slot.id}
+                      className="block w-full cursor-pointer rounded-lg border border-gray-200 bg-white p-3 text-left shadow-sm transition hover:border-maroon-300 hover:shadow-md disabled:cursor-wait disabled:opacity-60"
                     >
-                      <SlotCardContent slot={slot} />
-                    </Link>
+                      <SlotCardContent
+                        slot={slot}
+                        badge={
+                          resolvingSlotId === slot.id && (
+                            <span className="shrink-0 text-[10px] font-medium text-gray-400">
+                              Finding…
+                            </span>
+                          )
+                        }
+                      />
+                    </button>
                   ) : (
                     <button
                       key={slot.id}

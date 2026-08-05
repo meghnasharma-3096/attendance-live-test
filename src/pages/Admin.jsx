@@ -1,9 +1,16 @@
 import { useEffect, useState } from 'react'
 import { useAuth } from '../context/AuthContext.jsx'
 import { supabase } from '../lib/supabaseClient.js'
-import { formatDateIST, getTodayISTDateString } from '../lib/dateFormat.js'
+import {
+  addDaysToDateString,
+  formatDateIST,
+  getTodayISTDateString,
+  nextOccurrenceOfDay,
+} from '../lib/dateFormat.js'
 import { courseShortCode, downloadCsv, rowsToCsv } from '../lib/csv.js'
 import UserMenu from '../components/UserMenu.jsx'
+
+const DAY_ORDER = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 
 const STATUS_STYLES = {
   not_started: 'bg-gray-100 text-gray-600',
@@ -23,10 +30,11 @@ function statusLabel(status) {
 }
 
 function displaySessionDate(session) {
+  const todayString = getTodayISTDateString()
   const neverGoneLive =
     session.status === 'not_started' || (session.status === 'awaiting_end' && !session.current_phase)
-  const dateString = neverGoneLive ? getTodayISTDateString() : session.session_date
-  return formatDateIST(dateString)
+  const isStale = neverGoneLive && session.session_date < todayString
+  return formatDateIST(isStale ? todayString : session.session_date)
 }
 
 export default function Admin() {
@@ -47,6 +55,11 @@ export default function Admin() {
 
   const [exportingCourse, setExportingCourse] = useState(false)
   const [exportError, setExportError] = useState('')
+
+  const [functionalSlots, setFunctionalSlots] = useState([])
+  const [weeksInput, setWeeksInput] = useState('4')
+  const [generating, setGenerating] = useState(false)
+  const [generateMessage, setGenerateMessage] = useState(null)
 
   const selectedCourse = courses.find((c) => c.id === selectedCourseId) ?? null
 
@@ -90,6 +103,7 @@ export default function Admin() {
 
     setDurationInput(String(selectedCourse.default_qr_duration_seconds))
     setSaveMessage(null)
+    setGenerateMessage(null)
 
     async function loadSessions() {
       setSessionsLoading(true)
@@ -97,7 +111,7 @@ export default function Admin() {
 
       const { data, error: sessionsErr } = await supabase
         .from('sessions')
-        .select('session_number, session_date, status, current_phase')
+        .select('session_number, session_date, status, current_phase, timing_config, mid_class_enabled')
         .eq('course_id', selectedCourse.id)
         .order('session_number')
 
@@ -111,8 +125,113 @@ export default function Admin() {
       setSessionsLoading(false)
     }
 
+    async function loadFunctionalSlots() {
+      const shortCode = courseShortCode(selectedCourse.name)
+      const { data } = await supabase
+        .from('timetable_slots')
+        .select('id, day_of_week')
+        .eq('course_name', shortCode)
+        .eq('is_functional', true)
+
+      setFunctionalSlots(data ?? [])
+    }
+
     loadSessions()
+    loadFunctionalSlots()
   }, [selectedCourse?.id])
+
+  const slotDays = [...new Set(functionalSlots.map((s) => s.day_of_week))].sort(
+    (a, b) => DAY_ORDER.indexOf(a) - DAY_ORDER.indexOf(b),
+  )
+  const slotsPerWeek = slotDays.length
+  const existingCount = sessions.length
+  const maxSessionNumber = existingCount > 0 ? Math.max(...sessions.map((s) => s.session_number)) : 0
+  const weeksSoFar = slotsPerWeek > 0 ? Math.ceil(existingCount / slotsPerWeek) : 0
+
+  async function handleGenerateSessions() {
+    setGenerateMessage(null)
+
+    const weeks = Number(weeksInput)
+    if (!Number.isInteger(weeks) || weeks < 1) {
+      setGenerateMessage({ type: 'error', text: 'Enter a whole number of weeks (1 or more).' })
+      return
+    }
+
+    if (slotsPerWeek === 0) {
+      setGenerateMessage({
+        type: 'error',
+        text: 'No functional timetable slots are configured for this course, so sessions cannot be auto-generated.',
+      })
+      return
+    }
+
+    const totalNew = weeks * slotsPerWeek
+    const projectedTotal = existingCount + totalNew
+
+    if (projectedTotal > selectedCourse.total_sessions) {
+      const maxWeeks = Math.floor((selectedCourse.total_sessions - existingCount) / slotsPerWeek)
+      setGenerateMessage({
+        type: 'error',
+        text:
+          maxWeeks > 0
+            ? `Generating ${weeks} more week(s) would create ${totalNew} sessions (${slotsPerWeek}/week), bringing the total to ${projectedTotal} — beyond the planned ${selectedCourse.total_sessions}. Try ${maxWeeks} week(s) or fewer.`
+            : `This course's planned ${selectedCourse.total_sessions} sessions are already fully scheduled (currently at ${existingCount}). No more can be generated.`,
+      })
+      return
+    }
+
+    setGenerating(true)
+
+    const latestDate =
+      existingCount > 0
+        ? sessions.reduce((max, s) => (s.session_date > max ? s.session_date : max), sessions[0].session_date)
+        : getTodayISTDateString()
+
+    const mostRecentSession =
+      existingCount > 0
+        ? sessions.reduce((latest, s) => (s.session_number > latest.session_number ? s : latest), sessions[0])
+        : null
+
+    const timingConfig = mostRecentSession?.timing_config ?? 'start'
+    const midClassEnabled = mostRecentSession?.mid_class_enabled ?? false
+
+    const occurrenceDates = []
+    for (const day of slotDays) {
+      const firstOccurrence = nextOccurrenceOfDay(latestDate, day)
+      for (let w = 0; w < weeks; w++) {
+        occurrenceDates.push(addDaysToDateString(firstOccurrence, w * 7))
+      }
+    }
+    occurrenceDates.sort()
+
+    const newRows = occurrenceDates.map((date, i) => ({
+      course_id: selectedCourse.id,
+      session_number: maxSessionNumber + 1 + i,
+      session_date: date,
+      status: 'not_started',
+      timing_config: timingConfig,
+      mid_class_enabled: midClassEnabled,
+      qr_duration_seconds: null,
+    }))
+
+    const { data, error: insertError } = await supabase
+      .from('sessions')
+      .insert(newRows)
+      .select('session_number, session_date, status, current_phase, timing_config, mid_class_enabled')
+
+    setGenerating(false)
+
+    if (insertError) {
+      setGenerateMessage({ type: 'error', text: insertError.message })
+      return
+    }
+
+    setSessions((prev) => [...prev, ...data].sort((a, b) => a.session_number - b.session_number))
+    setGenerateMessage({
+      type: 'success',
+      text: `Created ${data.length} new session(s): #${maxSessionNumber + 1}–#${maxSessionNumber + data.length}.`,
+    })
+  }
 
   async function handleSaveDuration() {
     setSavingDuration(true)
@@ -321,6 +440,61 @@ export default function Admin() {
             }`}
           >
             {saveMessage.text}
+          </p>
+        )}
+      </div>
+
+      <div className="mt-6 rounded-xl bg-white p-6 shadow-sm sm:p-8">
+        <h2 className="text-base font-semibold text-gray-900">Generate Upcoming Sessions</h2>
+        <p className="mt-1 text-sm text-gray-500">
+          Session {maxSessionNumber} of {selectedCourse.total_sessions} planned
+          {slotsPerWeek > 0 && (
+            <>
+              {' '}
+              · {weeksSoFar} week{weeksSoFar === 1 ? '' : 's'} completed so far ({slotsPerWeek} class
+              {slotsPerWeek === 1 ? '' : 'es'}/week)
+            </>
+          )}
+        </p>
+
+        {slotsPerWeek === 0 ? (
+          <p className="mt-4 text-sm text-gray-400">
+            No functional timetable slots are configured for this course.
+          </p>
+        ) : (
+          <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center">
+            <div className="flex items-center gap-2">
+              <label htmlFor="weeks-to-generate" className="text-sm font-medium text-gray-700">
+                Weeks to generate
+              </label>
+              <input
+                id="weeks-to-generate"
+                type="number"
+                min="1"
+                value={weeksInput}
+                onChange={(e) => setWeeksInput(e.target.value)}
+                className="w-20 rounded-lg border border-gray-300 px-3.5 py-2.5 text-center text-gray-900 outline-none transition focus:border-maroon-600 focus:ring-2 focus:ring-maroon-100"
+              />
+            </div>
+            <button
+              type="button"
+              onClick={handleGenerateSessions}
+              disabled={generating}
+              className="rounded-lg bg-maroon-600 px-6 py-2.5 font-medium text-white transition hover:bg-maroon-700 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {generating ? 'Generating…' : 'Generate Upcoming Sessions'}
+            </button>
+          </div>
+        )}
+
+        {generateMessage && (
+          <p
+            role="alert"
+            className={`mt-3 rounded-lg px-3.5 py-2.5 text-sm ${
+              generateMessage.type === 'error' ? 'bg-red-50 text-red-700' : 'bg-green-50 text-green-700'
+            }`}
+          >
+            {generateMessage.text}
           </p>
         )}
       </div>

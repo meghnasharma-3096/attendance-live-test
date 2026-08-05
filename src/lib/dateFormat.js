@@ -27,3 +27,35 @@ export function formatDateTimeIST(timestamp) {
     minute: '2-digit',
   })
 }
+
+const DAY_ABBREVS_BY_UTC_INDEX = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+const WEEK_ORDER = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+
+export function addDaysToDateString(dateString, days) {
+  const [y, m, d] = dateString.split('-').map(Number)
+  const dt = new Date(Date.UTC(y, m - 1, d))
+  dt.setUTCDate(dt.getUTCDate() + days)
+  return dt.toISOString().slice(0, 10)
+}
+
+export function dayAbbrevForDateString(dateString) {
+  const [y, m, d] = dateString.split('-').map(Number)
+  return DAY_ABBREVS_BY_UTC_INDEX[new Date(Date.UTC(y, m - 1, d)).getUTCDay()]
+}
+
+// Smallest date strictly after `afterDateString` whose weekday matches dayAbbrev.
+export function nextOccurrenceOfDay(afterDateString, dayAbbrev) {
+  let candidate = addDaysToDateString(afterDateString, 1)
+  while (dayAbbrevForDateString(candidate) !== dayAbbrev) {
+    candidate = addDaysToDateString(candidate, 1)
+  }
+  return candidate
+}
+
+// The date of dayAbbrev within the Mon–Sun week that contains referenceDateString.
+export function dateForDayInWeekOf(referenceDateString, dayAbbrev) {
+  const refIndex = WEEK_ORDER.indexOf(dayAbbrevForDateString(referenceDateString))
+  const targetIndex = WEEK_ORDER.indexOf(dayAbbrev)
+  const mondayOfWeek = addDaysToDateString(referenceDateString, -refIndex)
+  return addDaysToDateString(mondayOfWeek, targetIndex)
+}

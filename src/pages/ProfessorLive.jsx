@@ -22,9 +22,10 @@ function buildScanUrl(sessionId, token, phase) {
 }
 
 function displaySessionDate(session) {
+  const todayString = getTodayISTDateString()
   const neverGoneLive = session.status === 'not_started' || (session.status === 'awaiting_end' && !session.current_phase)
-  const dateString = neverGoneLive ? getTodayISTDateString() : session.session_date
-  return formatDateIST(dateString)
+  const isStale = neverGoneLive && session.session_date < todayString
+  return formatDateIST(isStale ? todayString : session.session_date)
 }
 
 function getCurrentPosition() {

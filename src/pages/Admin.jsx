@@ -50,13 +50,24 @@ function emptySlotForm() {
   return { day_of_week: 'Mon', start_time: '10:30', end_time: '12:00', section: '', room: '', is_functional: false }
 }
 
+function emptyCourseForm() {
+  return { name: '', professor_name: '', total_sessions: '20', default_qr_duration_seconds: '60' }
+}
+
 export default function Admin() {
   const { user } = useAuth()
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [courses, setCourses] = useState([])
   const [students, setStudents] = useState([])
+  const [studentsLoading, setStudentsLoading] = useState(true)
+  const [studentsError, setStudentsError] = useState('')
   const [selectedCourseId, setSelectedCourseId] = useState(null)
+
+  const [courseFormOpen, setCourseFormOpen] = useState(false)
+  const [courseForm, setCourseForm] = useState(emptyCourseForm())
+  const [savingCourse, setSavingCourse] = useState(false)
+  const [courseFormError, setCourseFormError] = useState('')
 
   const [sessionsLoading, setSessionsLoading] = useState(true)
   const [sessionsError, setSessionsError] = useState('')
@@ -93,28 +104,19 @@ export default function Admin() {
       setLoading(true)
       setError('')
 
-      const [coursesRes, studentsRes] = await Promise.all([
-        supabase
-          .from('courses')
-          .select('id, name, professor_name, total_sessions, default_qr_duration_seconds')
-          .order('created_at'),
-        supabase.from('students').select('pgp_id, name').order('name'),
-      ])
+      const { data, error: coursesError } = await supabase
+        .from('courses')
+        .select('id, name, professor_name, total_sessions, default_qr_duration_seconds')
+        .order('created_at')
 
-      if (coursesRes.error || !coursesRes.data || coursesRes.data.length === 0) {
-        setError(coursesRes.error?.message ?? 'No courses found')
-        setLoading(false)
-        return
-      }
-      if (studentsRes.error) {
-        setError(studentsRes.error.message)
+      if (coursesError || !data || data.length === 0) {
+        setError(coursesError?.message ?? 'No courses found')
         setLoading(false)
         return
       }
 
-      setCourses(coursesRes.data)
-      setStudents(studentsRes.data ?? [])
-      setSelectedCourseId(coursesRes.data[0].id)
+      setCourses(data)
+      setSelectedCourseId(data[0].id)
       setLoading(false)
     }
 
@@ -130,6 +132,8 @@ export default function Admin() {
     setTimetableMessage(null)
     setSlotFormOpen(false)
     setEditingSlotId(null)
+    setCourseFormOpen(false)
+    setCourseFormError('')
 
     async function loadSessions() {
       setSessionsLoading(true)
@@ -153,7 +157,32 @@ export default function Admin() {
 
     loadSessions()
     loadTimetableSlots(selectedCourse)
+    loadEnrolledStudents(selectedCourse)
   }, [selectedCourse?.id])
+
+  async function loadEnrolledStudents(course) {
+    setStudentsLoading(true)
+    setStudentsError('')
+
+    const { data, error: enrollError } = await supabase
+      .from('enrollments')
+      .select('students(pgp_id, name)')
+      .eq('course_id', course.id)
+
+    if (enrollError) {
+      setStudentsError(enrollError.message)
+      setStudentsLoading(false)
+      return
+    }
+
+    const enrolled = (data ?? [])
+      .map((e) => e.students)
+      .filter(Boolean)
+      .sort((a, b) => a.name.localeCompare(b.name))
+
+    setStudents(enrolled)
+    setStudentsLoading(false)
+  }
 
   async function loadTimetableSlots(course) {
     setSlotsLoading(true)
@@ -386,6 +415,63 @@ export default function Admin() {
     })
   }
 
+  function handleOpenCourseForm() {
+    setCourseForm(emptyCourseForm())
+    setCourseFormError('')
+    setCourseFormOpen(true)
+  }
+
+  function handleCloseCourseForm() {
+    setCourseFormOpen(false)
+    setCourseFormError('')
+  }
+
+  async function handleCreateCourse() {
+    setCourseFormError('')
+
+    const name = courseForm.name.trim()
+    const professorName = courseForm.professor_name.trim()
+    const totalSessions = Number(courseForm.total_sessions)
+    const qrDuration = Number(courseForm.default_qr_duration_seconds)
+
+    if (!name || !professorName) {
+      setCourseFormError('Course name and professor name are required.')
+      return
+    }
+    if (!Number.isInteger(totalSessions) || totalSessions <= 0) {
+      setCourseFormError('Total sessions must be a positive whole number.')
+      return
+    }
+    if (!Number.isInteger(qrDuration) || qrDuration <= 0) {
+      setCourseFormError('Default QR duration must be a positive whole number.')
+      return
+    }
+
+    setSavingCourse(true)
+
+    const { data, error: insertError } = await supabase
+      .from('courses')
+      .insert({
+        name,
+        professor_name: professorName,
+        total_sessions: totalSessions,
+        default_qr_duration_seconds: qrDuration,
+      })
+      .select('id, name, professor_name, total_sessions, default_qr_duration_seconds')
+      .single()
+
+    setSavingCourse(false)
+
+    if (insertError) {
+      setCourseFormError(insertError.message)
+      return
+    }
+
+    setCourses((prev) => [...prev, data])
+    setSelectedCourseId(data.id)
+    setCourseFormOpen(false)
+  }
+
   async function handleSaveDuration() {
     setSavingDuration(true)
     setSaveMessage(null)
@@ -523,7 +609,7 @@ export default function Admin() {
           <UserMenu />
         </div>
 
-        <div className="mt-6 flex flex-wrap gap-2 border-t border-gray-100 pt-4">
+        <div className="mt-6 flex flex-wrap items-center gap-2 border-t border-gray-100 pt-4">
           {courses.map((c) => (
             <button
               key={c.id}
@@ -538,7 +624,26 @@ export default function Admin() {
               {c.name}
             </button>
           ))}
+          <button
+            type="button"
+            onClick={handleOpenCourseForm}
+            title="Create New Course"
+            className="rounded-lg border-2 border-dashed border-gray-300 px-3 py-2 text-sm font-medium text-gray-500 transition hover:border-maroon-300 hover:text-maroon-600"
+          >
+            + New Course
+          </button>
         </div>
+
+        {courseFormOpen && (
+          <CourseForm
+            form={courseForm}
+            onChange={setCourseForm}
+            onSave={handleCreateCourse}
+            onCancel={handleCloseCourseForm}
+            saving={savingCourse}
+            error={courseFormError}
+          />
+        )}
 
         <div className="mt-4 flex flex-wrap items-center gap-3">
           <button
@@ -755,27 +860,42 @@ export default function Admin() {
       <div className="mt-6 rounded-xl bg-white shadow-sm">
         <div className="border-b border-gray-100 px-6 py-4">
           <h2 className="text-base font-semibold text-gray-900">
-            Course Roster ({students.length})
+            Course Roster {studentsLoading ? '' : `(${students.length})`}
           </h2>
         </div>
-        <div className="max-h-[28rem] overflow-y-auto">
-          <table className="w-full text-left text-sm">
-            <thead className="sticky top-0 bg-white">
-              <tr className="border-b border-gray-100 text-xs font-medium tracking-wide text-gray-500 uppercase">
-                <th className="px-6 py-3">Name</th>
-                <th className="px-6 py-3">PGP ID</th>
-              </tr>
-            </thead>
-            <tbody>
-              {students.map((student, i) => (
-                <tr key={student.pgp_id} className={i % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
-                  <td className="px-6 py-3 font-medium text-gray-900">{student.name}</td>
-                  <td className="px-6 py-3 text-gray-600">{student.pgp_id}</td>
+        {studentsLoading ? (
+          <p className="px-6 py-4 text-sm text-gray-500">Loading…</p>
+        ) : studentsError ? (
+          <p role="alert" className="px-6 py-4 text-sm text-red-700">
+            {studentsError}
+          </p>
+        ) : students.length === 0 ? (
+          <div className="px-6 py-8 text-center">
+            <p className="text-sm text-gray-500">No students enrolled yet.</p>
+            <p className="mt-1 text-xs text-gray-400">
+              Enrollment management isn't built yet — new courses start with an empty roster.
+            </p>
+          </div>
+        ) : (
+          <div className="max-h-[28rem] overflow-y-auto">
+            <table className="w-full text-left text-sm">
+              <thead className="sticky top-0 bg-white">
+                <tr className="border-b border-gray-100 text-xs font-medium tracking-wide text-gray-500 uppercase">
+                  <th className="px-6 py-3">Name</th>
+                  <th className="px-6 py-3">PGP ID</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+              </thead>
+              <tbody>
+                {students.map((student, i) => (
+                  <tr key={student.pgp_id} className={i % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
+                    <td className="px-6 py-3 font-medium text-gray-900">{student.name}</td>
+                    <td className="px-6 py-3 text-gray-600">{student.pgp_id}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
 
       <div className="mt-6 overflow-hidden rounded-xl bg-white shadow-sm">
@@ -829,6 +949,89 @@ export default function Admin() {
         )}
       </div>
     </PageShell>
+  )
+}
+
+function CourseForm({ form, onChange, onSave, onCancel, saving, error }) {
+  function setField(field, value) {
+    onChange({ ...form, [field]: value })
+  }
+
+  return (
+    <div className="mt-4 rounded-lg border border-gray-200 bg-gray-50 p-5">
+      <h3 className="text-sm font-semibold text-gray-900">Create New Course</h3>
+
+      <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <div className="sm:col-span-2">
+          <label className="text-sm font-medium text-gray-700">Course name</label>
+          <input
+            type="text"
+            value={form.name}
+            onChange={(e) => setField('name', e.target.value)}
+            placeholder="e.g. Marketing Management — Section A"
+            className="mt-1 w-full rounded-lg border border-gray-300 px-3.5 py-2.5 text-gray-900 outline-none transition focus:border-maroon-600 focus:ring-2 focus:ring-maroon-100"
+          />
+        </div>
+
+        <div className="sm:col-span-2">
+          <label className="text-sm font-medium text-gray-700">Professor name</label>
+          <input
+            type="text"
+            value={form.professor_name}
+            onChange={(e) => setField('professor_name', e.target.value)}
+            placeholder="e.g. Prof Jane Doe"
+            className="mt-1 w-full rounded-lg border border-gray-300 px-3.5 py-2.5 text-gray-900 outline-none transition focus:border-maroon-600 focus:ring-2 focus:ring-maroon-100"
+          />
+        </div>
+
+        <div>
+          <label className="text-sm font-medium text-gray-700">Total sessions planned</label>
+          <input
+            type="number"
+            min="1"
+            value={form.total_sessions}
+            onChange={(e) => setField('total_sessions', e.target.value)}
+            className="mt-1 w-full rounded-lg border border-gray-300 px-3.5 py-2.5 text-gray-900 outline-none transition focus:border-maroon-600 focus:ring-2 focus:ring-maroon-100"
+          />
+        </div>
+
+        <div>
+          <label className="text-sm font-medium text-gray-700">Default QR duration (seconds)</label>
+          <input
+            type="number"
+            min="1"
+            value={form.default_qr_duration_seconds}
+            onChange={(e) => setField('default_qr_duration_seconds', e.target.value)}
+            className="mt-1 w-full rounded-lg border border-gray-300 px-3.5 py-2.5 text-gray-900 outline-none transition focus:border-maroon-600 focus:ring-2 focus:ring-maroon-100"
+          />
+        </div>
+      </div>
+
+      {error && (
+        <p role="alert" className="mt-3 rounded-lg bg-red-50 px-3.5 py-2.5 text-sm text-red-700">
+          {error}
+        </p>
+      )}
+
+      <div className="mt-4 flex flex-wrap items-center gap-3">
+        <button
+          type="button"
+          onClick={onSave}
+          disabled={saving}
+          className="rounded-lg bg-maroon-600 px-6 py-2.5 text-sm font-medium text-white transition hover:bg-maroon-700 disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          {saving ? 'Creating…' : 'Create Course'}
+        </button>
+        <button
+          type="button"
+          onClick={onCancel}
+          disabled={saving}
+          className="rounded-lg px-6 py-2.5 text-sm font-medium text-gray-600 transition hover:bg-gray-100"
+        >
+          Cancel
+        </button>
+      </div>
+    </div>
   )
 }
 

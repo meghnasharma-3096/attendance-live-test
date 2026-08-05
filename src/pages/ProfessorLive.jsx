@@ -6,16 +6,23 @@ import { supabase } from '../lib/supabaseClient.js'
 import { formatDateIST, getTodayISTDateString } from '../lib/dateFormat.js'
 import UserMenu from '../components/UserMenu.jsx'
 
+const TIMING_OPTIONS = [
+  { value: 'start', label: 'Start of class' },
+  { value: 'end', label: 'End of class' },
+  { value: 'both', label: 'Both' },
+]
+
 function generateToken() {
   return Math.random().toString(36).substring(2, 10)
 }
 
-function buildScanUrl(sessionId, token) {
-  return `${window.location.origin}${window.location.pathname}#/scan?session=${sessionId}&token=${token}`
+function buildScanUrl(sessionId, token, phase) {
+  return `${window.location.origin}${window.location.pathname}#/scan?session=${sessionId}&token=${token}&phase=${phase}`
 }
 
 function displaySessionDate(session) {
-  const dateString = session.status === 'not_started' ? getTodayISTDateString() : session.session_date
+  const neverGoneLive = session.status === 'not_started' || (session.status === 'awaiting_end' && !session.current_phase)
+  const dateString = neverGoneLive ? getTodayISTDateString() : session.session_date
   return formatDateIST(dateString)
 }
 
@@ -43,8 +50,11 @@ export default function ProfessorLive() {
   const [ending, setEnding] = useState(false)
   const [endError, setEndError] = useState('')
   const [durationInput, setDurationInput] = useState('')
+  const [timingConfig, setTimingConfig] = useState('start')
+  const [midClassEnabled, setMidClassEnabled] = useState(false)
   const [token, setToken] = useState('')
   const [countdown, setCountdown] = useState(0)
+  const [isReverification, setIsReverification] = useState(false)
   const [presentCount, setPresentCount] = useState(0)
   const [manuallyMarked, setManuallyMarked] = useState([])
 
@@ -55,7 +65,9 @@ export default function ProfessorLive() {
 
       const { data: sessionRow, error: sessionError } = await supabase
         .from('sessions')
-        .select('id, course_id, session_number, session_date, status, qr_duration_seconds')
+        .select(
+          'id, course_id, session_number, session_date, status, qr_duration_seconds, timing_config, mid_class_enabled, current_phase',
+        )
         .eq('id', sessionId)
         .maybeSingle()
 
@@ -80,6 +92,8 @@ export default function ProfessorLive() {
       setCourse(courseRow)
       setSession(sessionRow)
       setDurationInput(String(sessionRow.qr_duration_seconds ?? courseRow.default_qr_duration_seconds))
+      setTimingConfig(sessionRow.timing_config ?? 'start')
+      setMidClassEnabled(sessionRow.mid_class_enabled ?? false)
       setLoading(false)
     }
 
@@ -91,10 +105,11 @@ export default function ProfessorLive() {
 
     const durationSeconds = session.qr_duration_seconds ?? 60
 
-    async function rotateToken() {
+    async function rotateToken(isReverify) {
       const newToken = generateToken()
       setToken(newToken)
       setCountdown(durationSeconds)
+      setIsReverification(isReverify)
 
       const { error: tokenError } = await supabase
         .from('sessions')
@@ -106,26 +121,38 @@ export default function ProfessorLive() {
       }
     }
 
-    rotateToken()
+    rotateToken(false)
 
-    const timer = setInterval(() => {
+    const countdownTimer = setInterval(() => {
       setCountdown((prev) => {
         if (prev <= 1) {
-          rotateToken()
+          rotateToken(false)
           return durationSeconds
         }
         return prev - 1
       })
     }, 1000)
 
-    return () => clearInterval(timer)
-  }, [session?.status, session?.id, session?.qr_duration_seconds])
+    let reverifyTimer = null
+    if (session.mid_class_enabled) {
+      const delayMs = (60 + Math.random() * 240) * 1000 // random point between 1 and 5 minutes
+      reverifyTimer = setTimeout(() => rotateToken(true), delayMs)
+    }
+
+    return () => {
+      clearInterval(countdownTimer)
+      if (reverifyTimer) clearTimeout(reverifyTimer)
+    }
+  }, [session?.status, session?.id, session?.qr_duration_seconds, session?.mid_class_enabled])
 
   async function refreshAttendance() {
+    const phase = session.current_phase ?? 'start'
+
     const { count, error: countError } = await supabase
       .from('attendance_records')
       .select('*', { count: 'exact', head: true })
       .eq('session_id', session.id)
+      .eq('phase', phase)
 
     if (!countError) setPresentCount(count ?? 0)
 
@@ -133,6 +160,7 @@ export default function ProfessorLive() {
       .from('attendance_records')
       .select('student_pgp_id, marked_at, students(name)')
       .eq('session_id', session.id)
+      .eq('phase', phase)
       .eq('method', 'manual_entry')
       .order('marked_at', { ascending: false })
 
@@ -166,7 +194,7 @@ export default function ProfessorLive() {
     }
   }, [session?.status, session?.id])
 
-  async function handleStart() {
+  async function goLive(phase, extraFields = {}) {
     setStarting(true)
     setStartError('')
 
@@ -176,7 +204,7 @@ export default function ProfessorLive() {
     } catch (geoError) {
       setStarting(false)
       setStartError(
-        `GPS reference is required to start the session. ${
+        `GPS reference is required to start attendance. ${
           geoError.message || 'Location access was denied or is unavailable.'
         }`,
       )
@@ -186,11 +214,12 @@ export default function ProfessorLive() {
     const { data, error: updateError } = await supabase
       .from('sessions')
       .update({
+        ...extraFields,
         status: 'qr_live',
+        current_phase: phase,
         reference_lat: position.coords.latitude,
         reference_lng: position.coords.longitude,
         qr_started_at: new Date().toISOString(),
-        qr_duration_seconds: Number(durationInput),
         session_date: getTodayISTDateString(),
       })
       .eq('id', session.id)
@@ -207,13 +236,52 @@ export default function ProfessorLive() {
     setSession(data)
   }
 
+  async function handleStart() {
+    const config = {
+      timing_config: timingConfig,
+      mid_class_enabled: midClassEnabled,
+      qr_duration_seconds: Number(durationInput),
+    }
+
+    if (timingConfig === 'end') {
+      setStarting(true)
+      setStartError('')
+
+      const { data, error: updateError } = await supabase
+        .from('sessions')
+        .update({ ...config, status: 'awaiting_end' })
+        .eq('id', session.id)
+        .select()
+        .single()
+
+      setStarting(false)
+
+      if (updateError) {
+        setStartError(updateError.message)
+        return
+      }
+
+      setSession(data)
+      return
+    }
+
+    await goLive('start', config)
+  }
+
+  function handleOpenEndRound() {
+    return goLive('end')
+  }
+
   async function handleEndSession() {
     setEnding(true)
     setEndError('')
 
+    const nextStatus =
+      session.timing_config === 'both' && session.current_phase === 'start' ? 'awaiting_end' : 'ended'
+
     const { data, error: updateError } = await supabase
       .from('sessions')
-      .update({ status: 'ended' })
+      .update({ status: nextStatus })
       .eq('id', session.id)
       .select()
       .single()
@@ -281,8 +349,49 @@ export default function ProfessorLive() {
         </div>
 
         {session.status === 'not_started' && (
-          <div className="mt-10 flex flex-col items-center gap-4 py-8 text-center">
+          <div className="mt-10 flex flex-col items-center gap-5 py-8 text-center">
             <p className="text-gray-500">This session hasn't started yet.</p>
+
+            <div className="w-full max-w-sm text-left">
+              <p className="text-sm font-medium text-gray-700">Take attendance at:</p>
+              <div className="mt-2 flex gap-2">
+                {TIMING_OPTIONS.map((opt) => (
+                  <button
+                    key={opt.value}
+                    type="button"
+                    onClick={() => setTimingConfig(opt.value)}
+                    className={`flex-1 rounded-lg border px-3 py-2 text-sm font-medium transition ${
+                      timingConfig === opt.value
+                        ? 'border-maroon-600 bg-maroon-50 text-maroon-700'
+                        : 'border-gray-300 text-gray-600 hover:bg-gray-50'
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <label className="flex w-full max-w-sm cursor-pointer items-center justify-between gap-4">
+              <span className="text-sm font-medium text-gray-700">
+                Enable one random mid-class re-verification
+              </span>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={midClassEnabled}
+                onClick={() => setMidClassEnabled((v) => !v)}
+                className={`relative h-6 w-11 shrink-0 rounded-full transition ${
+                  midClassEnabled ? 'bg-maroon-600' : 'bg-gray-300'
+                }`}
+              >
+                <span
+                  className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${
+                    midClassEnabled ? 'translate-x-5' : 'translate-x-0.5'
+                  }`}
+                />
+              </button>
+            </label>
 
             <div className="flex items-center gap-2">
               <label htmlFor="qr-duration" className="text-sm font-medium text-gray-700">
@@ -319,19 +428,48 @@ export default function ProfessorLive() {
           </div>
         )}
 
+        {session.status === 'awaiting_end' && (
+          <div className="mt-10 flex flex-col items-center gap-4 py-8 text-center">
+            <p className="text-gray-500">
+              {session.current_phase === 'start'
+                ? 'Start-of-class attendance closed. Open the second round when class is ending.'
+                : 'Waiting until end of class.'}
+            </p>
+            <button
+              type="button"
+              onClick={handleOpenEndRound}
+              disabled={starting}
+              className="rounded-lg bg-maroon-600 px-8 py-3 text-lg font-medium text-white transition hover:bg-maroon-700 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {starting ? 'Opening…' : 'Open End-of-Class Attendance'}
+            </button>
+            {startError && (
+              <p role="alert" className="max-w-sm rounded-lg bg-red-50 px-3.5 py-2.5 text-sm text-red-700">
+                {startError}
+              </p>
+            )}
+          </div>
+        )}
+
         {session.status === 'qr_live' && (
-          <div className="mt-10 flex flex-col items-center gap-12">
+          <div className="mt-10 flex flex-col items-center gap-8">
+            {isReverification && (
+              <span className="rounded-full bg-amber-100 px-3 py-1 text-xs font-semibold tracking-wide text-amber-700 uppercase">
+                Re-verification check
+              </span>
+            )}
+
             <div className="flex flex-col items-center gap-8 sm:flex-row sm:items-center sm:justify-center sm:gap-12">
               <div className="w-full max-w-[380px] rounded-2xl border-4 border-maroon-600 bg-white p-4 shadow-lg sm:p-8">
                 <QRCodeSVG
-                  value={buildScanUrl(session.id, token)}
+                  value={buildScanUrl(session.id, token, session.current_phase ?? 'start')}
                   size={340}
                   style={{ width: '100%', height: 'auto' }}
                 />
               </div>
               <div className="text-center">
                 <p className="text-sm font-medium tracking-wide text-gray-500 uppercase">
-                  Refreshes in
+                  {session.current_phase === 'end' ? 'End-of-class · Refreshes in' : 'Refreshes in'}
                 </p>
                 <p className="text-7xl font-bold tabular-nums text-maroon-600">{countdown}s</p>
               </div>
@@ -358,16 +496,13 @@ export default function ProfessorLive() {
           </div>
         )}
 
-        {session.status !== 'not_started' && session.status !== 'qr_live' && (
-          <p className="mt-10 text-gray-500">
-            Session status: <span className="font-medium">{session.status}</span>
-          </p>
-        )}
+        {session.status === 'ended' && <p className="mt-10 text-gray-500">Session ended.</p>}
       </Card>
 
       {session.status === 'qr_live' && (
         <ManualOverrideCard
           sessionId={session.id}
+          phase={session.current_phase ?? 'start'}
           manuallyMarked={manuallyMarked}
           onMarked={refreshAttendance}
         />
@@ -376,7 +511,7 @@ export default function ProfessorLive() {
   )
 }
 
-function ManualOverrideCard({ sessionId, manuallyMarked, onMarked }) {
+function ManualOverrideCard({ sessionId, phase, manuallyMarked, onMarked }) {
   const [students, setStudents] = useState([])
   const [searchText, setSearchText] = useState('')
   const [selectedStudent, setSelectedStudent] = useState(null)
@@ -412,6 +547,7 @@ function ManualOverrideCard({ sessionId, manuallyMarked, onMarked }) {
       .select('id')
       .eq('session_id', sessionId)
       .eq('student_pgp_id', selectedStudent.pgp_id)
+      .eq('phase', phase)
       .maybeSingle()
 
     if (existingError) {
@@ -437,6 +573,7 @@ function ManualOverrideCard({ sessionId, manuallyMarked, onMarked }) {
       verification_tier: 'manual',
       flagged: false,
       flag_reason: null,
+      phase,
     })
 
     if (insertError) {

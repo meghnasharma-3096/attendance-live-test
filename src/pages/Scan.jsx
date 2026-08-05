@@ -39,6 +39,7 @@ export default function Scan() {
 
   const sessionId = searchParams.get('session')
   const token = searchParams.get('token')
+  const attendancePhase = searchParams.get('phase') || 'start'
 
   useEffect(() => {
     if (!user) return
@@ -81,6 +82,7 @@ export default function Scan() {
         .select('id')
         .eq('session_id', session.id)
         .eq('student_pgp_id', user.student_pgp_id)
+        .eq('phase', attendancePhase)
         .maybeSingle()
 
       if (existingError) {
@@ -122,6 +124,7 @@ export default function Scan() {
         session_id: session.id,
         device_fingerprint: deviceFingerprint,
         student_pgp_id: user.student_pgp_id,
+        phase: attendancePhase,
       })
 
       if (lockError) {
@@ -146,6 +149,7 @@ export default function Scan() {
         verification_tier: 'phone_gps',
         flagged: !gpsMatch,
         flag_reason: gpsMatch ? null : 'GPS location did not match classroom',
+        phase: attendancePhase,
       })
 
       if (insertError) {
@@ -158,7 +162,7 @@ export default function Scan() {
     }
 
     run()
-  }, [user, sessionId, token])
+  }, [user, sessionId, token, attendancePhase])
 
   return (
     <PageShell>

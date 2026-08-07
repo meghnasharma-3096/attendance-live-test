@@ -36,6 +36,11 @@ export function formatDateTimeIST(timestamp) {
 const DAY_ABBREVS_BY_UTC_INDEX = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 const WEEK_ORDER = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 
+export function daysInMonth(year, monthIndex) {
+  // Day 0 of the next month is the last day of this one — a standard trick, safe under UTC.
+  return new Date(Date.UTC(year, monthIndex + 1, 0)).getUTCDate()
+}
+
 export function addDaysToDateString(dateString, days) {
   const [y, m, d] = dateString.split('-').map(Number)
   const dt = new Date(Date.UTC(y, m - 1, d))

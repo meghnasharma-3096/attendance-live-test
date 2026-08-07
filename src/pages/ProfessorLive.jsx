@@ -341,6 +341,13 @@ export default function ProfessorLive() {
       return
     }
 
+    // Only bump session_date to today when the stored date has genuinely fallen behind (a
+    // not_started session nobody got to on its nominal day) — never when it's today or a real
+    // future date, since that would silently clobber an intentional reschedule. Matches the same
+    // staleness definition displaySessionDate already uses above.
+    const todayString = getTodayISTDateString()
+    const isStale = session.session_date < todayString
+
     const { data, error: updateError } = await supabase
       .from('sessions')
       .update({
@@ -350,7 +357,7 @@ export default function ProfessorLive() {
         reference_lat: position.coords.latitude,
         reference_lng: position.coords.longitude,
         qr_started_at: new Date().toISOString(),
-        session_date: getTodayISTDateString(),
+        ...(isStale ? { session_date: todayString } : {}),
       })
       .eq('id', session.id)
       .select()

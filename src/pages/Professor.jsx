@@ -179,6 +179,22 @@ function sessionStateLabel(timeState, methodCounts) {
   return 'Upcoming'
 }
 
+// A small string hash (not cryptographic — just needs to be deterministic and spread evenly),
+// so the same (date, section) pair always picks the same label on every reload rather than a
+// fresh coin flip each render. Purely cosmetic: ITC has no real course, session, or attendance
+// row anywhere in the database — this never touches the DB.
+function hashString(str) {
+  let hash = 0
+  for (let i = 0; i < str.length; i++) {
+    hash = (hash * 31 + str.charCodeAt(i)) | 0
+  }
+  return Math.abs(hash)
+}
+
+function demoAttendanceLabel(date, section) {
+  return hashString(`${date}::${section}`) % 2 === 0 ? 'Taken via QR' : 'Taken manually'
+}
+
 export default function Professor() {
   const navigate = useNavigate()
   const [todayString, setTodayString] = useState(getTodayISTDateString())
@@ -486,14 +502,20 @@ export default function Professor() {
                         const { slot, number } = entry.occ
                         // Same date-based coloring as a real session — built from this specific
                         // occurrence's date and the slot's fixed time, since a demo entry has no
-                        // status of its own to key off. It never has real attendance_records, so
-                        // a "past" occurrence always falls to the "no records" treatment.
+                        // status of its own to key off.
                         const demoTimeState = sessionTimeState(
                           { session_date: date, start_time: slot.start_time, end_time: slot.end_time },
                           todayString,
                           nowTimeString,
                         )
                         const colors = sessionColorClasses(demoTimeState, undefined)
+                        // A past-dated ITC card gets a stable, deterministic QR/manual label
+                        // (never real attendance — ITC has none) instead of "No attendance
+                        // recorded"; upcoming ones keep the plain state label unaffected.
+                        const isPastDemo = date < todayString
+                        const demoLabel = isPastDemo
+                          ? demoAttendanceLabel(date, slot.section)
+                          : sessionStateLabel(demoTimeState, undefined)
                         return (
                           <button
                             key={`${slot.id}-${date}`}
@@ -509,7 +531,7 @@ export default function Professor() {
                               {slot.room ? ` · ${slot.room}` : ''}
                             </p>
                             <p className={`truncate text-[9px] font-medium ${colors.subtitle}`}>
-                              {sessionStateLabel(demoTimeState, undefined)}
+                              {demoLabel}
                             </p>
                             {otherCourseLabel(slot, courses) && (
                               <p className={`truncate text-[9px] ${colors.subtitle}`}>{otherCourseLabel(slot, courses)}</p>

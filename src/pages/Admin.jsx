@@ -24,7 +24,7 @@ import {
   getTodayISTDateString,
   nextOccurrenceOfDay,
 } from '../lib/dateFormat.js'
-import { courseShortCode, downloadCsv, rowsToCsv } from '../lib/csv.js'
+import { courseSectionSuffix, courseShortCode, downloadCsv, rowsToCsv } from '../lib/csv.js'
 import UserMenu from '../components/UserMenu.jsx'
 
 const DISTRIBUTION_BAND_COLORS = {
@@ -543,11 +543,21 @@ export default function Admin() {
     setSlotsLoading(true)
     setSlotsError('')
 
+    // course_name is a short-code text field, not a foreign key — once two courses share a
+    // short code (e.g. DTAI Section A and Section B), a course_name-only filter would return
+    // both courses' slots mixed together, which handleGenerateSessions would then treat as one
+    // course's timetable. Narrow by section too whenever this course's name actually carries a
+    // section suffix to disambiguate against.
     const shortCode = courseShortCode(course.name)
-    const { data, error: slotsErr } = await supabase
+    const sectionSuffix = courseSectionSuffix(course.name)
+    let slotsQuery = supabase
       .from('timetable_slots')
       .select('id, day_of_week, start_time, end_time, section, room, is_functional')
       .eq('course_name', shortCode)
+    if (sectionSuffix) {
+      slotsQuery = slotsQuery.eq('section', sectionSuffix)
+    }
+    const { data, error: slotsErr } = await slotsQuery
 
     if (slotsErr) {
       setSlotsError(slotsErr.message)

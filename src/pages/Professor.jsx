@@ -9,17 +9,21 @@ import {
   formatTimeRange,
   getTodayISTDateString,
 } from '../lib/dateFormat.js'
-import { courseShortCode } from '../lib/csv.js'
+import { courseSectionSuffix, courseShortCode, findCourseForSlot } from '../lib/csv.js'
 import UserMenu from '../components/UserMenu.jsx'
 
-// This prototype only has one professor login (prof), which is deliberately given
-// visibility into every seeded course's timetable_slots — standing in for what would be
-// separate per-professor accounts in production, each seeing only their own slots via
+// This prototype only has one professor login, which is deliberately given visibility into
+// every seeded course's timetable_slots — standing in for what would be separate
+// per-professor accounts in production, each seeing only their own slots via
 // professor_identifier matching their own login. Since that means this single account's
 // calendar can show other professors' classes too (BDC, SOM), each non-DTAI slot is
 // labeled with its real course/professor so that's visually obvious rather than looking
 // like a data bug. See ARCHITECTURE_NOTES.md for the fuller explanation.
-const PROFESSOR_IDENTIFIER = 'prof'
+//
+// timetable_slots.professor_identifier for this login's rows is 'prof_dtai_itc' in the
+// database (distinct from the 'prof' login identifier used for verify_login) — must match
+// exactly, or every non-functional "Demo only" slot silently disappears from the calendar.
+const PROFESSOR_IDENTIFIER = 'prof_dtai_itc'
 const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 
 function dateStringFor(year, monthIndex, day) {
@@ -54,7 +58,9 @@ function buildMonthGridDates(year, monthIndex) {
 
 function otherCourseLabel(slot, courses) {
   if (slot.course_name === 'DTAI') return null
-  const course = courses.find((c) => courseShortCode(c.name) === slot.course_name)
+  // course_name is a short-code text field, not a foreign key — findCourseForSlot resolves the
+  // section ambiguity a shared short code (e.g. two DTAI sections) would otherwise create.
+  const course = findCourseForSlot(courses, slot)
   if (!course) return null
   return `${slot.course_name} · ${course.professor_name}`
 }
@@ -282,7 +288,9 @@ export default function Professor() {
                         className="block w-full rounded border-l-2 border-maroon-500 bg-maroon-50 px-1.5 py-1 text-left transition hover:bg-maroon-100"
                       >
                         <p className="truncate text-[11px] font-semibold text-maroon-800">
-                          {courseShortCode(session.courses?.name ?? '')} · S{session.session_number}
+                          {courseShortCode(session.courses?.name ?? '')}
+                          {courseSectionSuffix(session.courses?.name ?? '') ? ` ${courseSectionSuffix(session.courses?.name ?? '')}` : ''}
+                          {' '}· S{session.session_number}
                         </p>
                         <p className="truncate text-[10px] text-maroon-700">
                           {formatTimeRange(session.start_time, session.end_time) ?? 'Time TBD'}

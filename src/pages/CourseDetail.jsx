@@ -70,7 +70,7 @@ export default function CourseDetail() {
 
       const { data: sessionsData, error: sessionsError } = await supabase
         .from('sessions')
-        .select('id, session_number, session_date, start_time, end_time, room, status, cancellation_reason')
+        .select('id, session_number, session_date, start_time, end_time, room, status')
         .eq('course_id', courseId)
         .order('session_number')
 
@@ -109,7 +109,6 @@ export default function CourseDetail() {
           end_time: s.end_time,
           room: s.room,
           status: s.status,
-          cancellation_reason: s.cancellation_reason,
           attended: record !== null,
           attendanceRecord: record,
         }
@@ -205,12 +204,9 @@ export default function CourseDetail() {
     )
   }
 
-  // Cancelled sessions never happened, so they're excluded from the denominator here —
-  // otherwise a holiday or exam-week cancellation would unfairly drag down every
-  // student's attendance percentage.
-  const conductedRows = sessionRows.filter(
-    (row) => row.status !== 'not_started' && row.status !== 'cancelled',
-  )
+  // A not_started session hasn't happened yet, so it's excluded from the denominator — it
+  // shouldn't count against anyone's attendance percentage.
+  const conductedRows = sessionRows.filter((row) => row.status !== 'not_started')
   const attendedCount = conductedRows.filter((row) => row.attended).length
 
   return (
@@ -280,10 +276,6 @@ export default function CourseDetail() {
                     {row.status === 'not_started' ? (
                       <span className="inline-flex rounded-full bg-gray-100 px-2.5 py-1 text-xs font-medium text-gray-600">
                         Upcoming
-                      </span>
-                    ) : row.status === 'cancelled' ? (
-                      <span className="inline-flex rounded-full bg-gray-100 px-2.5 py-1 text-xs font-medium text-gray-400">
-                        Cancelled{row.cancellation_reason ? ` (${row.cancellation_reason})` : ''}
                       </span>
                     ) : (
                       <>

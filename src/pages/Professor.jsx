@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { CalendarDays, ChevronLeft, ChevronRight } from 'lucide-react'
 import { supabase } from '../lib/supabaseClient.js'
@@ -18,6 +18,13 @@ import UserMenu from '../components/UserMenu.jsx'
 // this professor doesn't teach (BDC, SOM) never appears here even if it has real sessions of
 // its own elsewhere in the app.
 const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+
+// ITC has never had a real course entity — only non-functional timetable_slots — so its
+// numbered occurrences are computed display-layer, not backed by real sessions rows. Each
+// (course_name, section) pairing gets its own 1..10 sequential numbering from this epoch,
+// mirroring how a real functional course's session-generation cap would behave.
+const NON_FUNCTIONAL_EPOCH = '2026-07-15'
+const NON_FUNCTIONAL_TOTAL_SESSIONS = 10
 
 function dateStringFor(year, monthIndex, day) {
   return `${year}-${String(monthIndex + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`
@@ -58,35 +65,100 @@ function otherCourseLabel(slot, courses) {
   return `${slot.course_name} · ${course.professor_name}`
 }
 
-// A session counts as "resolved" once it's live or past — anything that isn't still waiting
-// to be started. Cancelled sessions keep their own separate greyed-out treatment (handled
-// before this ever gets consulted), so they're deliberately not part of this set.
-const RESOLVED_STATUSES = new Set(['qr_live', 'manual_only', 'awaiting_end', 'ended'])
+// Groups non-functional slots by (course_name, section) — e.g. ITC/Sec H and ITC/Sec I are two
+// independent series — and walks forward day-by-day from the shared epoch assigning each real
+// calendar occurrence the next sequential number, stopping at NON_FUNCTIONAL_TOTAL_SESSIONS per
+// series. Returns a Map<dateString, Array<{ slot, number }>> covering only the first 10
+// occurrences of each series — nothing is ever computed (or shown) beyond that cap.
+function buildNonFunctionalOccurrences(slots) {
+  const groups = new Map()
+  for (const slot of slots) {
+    const key = `${slot.course_name}::${slot.section}`
+    const list = groups.get(key) ?? []
+    list.push(slot)
+    groups.set(key, list)
+  }
 
-function attendanceLabelFor(session, methodsBySession) {
-  const methods = methodsBySession.get(session.id)
-  if (!methods || methods.size === 0) return 'No attendance recorded'
-  if (methods.has('qr_scan')) return 'Taken via QR'
-  return 'Taken manually'
-}
-
-// The 4-color scheme: grey (future, not next up), red (the single next real session across
-// every course this professor teaches), a 4th color for resolved sessions showing how
-// attendance was taken, and cancelled sessions keep their own existing greyed treatment
-// (handled by the caller before reaching here).
-function sessionColorClasses(session, isNextUpcoming) {
-  if (RESOLVED_STATUSES.has(session.status)) {
-    return {
-      wrapper: 'block w-full rounded border-l-2 border-sky-500 bg-sky-50 px-1.5 py-1 text-left transition hover:bg-sky-100',
-      title: 'text-sky-800',
-      subtitle: 'text-sky-700',
+  const occurrencesByDate = new Map()
+  for (const groupSlots of groups.values()) {
+    let count = 0
+    let cursor = NON_FUNCTIONAL_EPOCH
+    // 400 days is a generous ceiling — real cadence here is 1-2x/week, so 10 occurrences
+    // always resolve well within a year.
+    for (let i = 0; i < 400 && count < NON_FUNCTIONAL_TOTAL_SESSIONS; i++) {
+      const weekday = dayAbbrevForDateString(cursor)
+      const matchingSlot = groupSlots.find((s) => s.day_of_week === weekday)
+      if (matchingSlot) {
+        count += 1
+        const list = occurrencesByDate.get(cursor) ?? []
+        list.push({ slot: matchingSlot, number: count })
+        occurrencesByDate.set(cursor, list)
+      }
+      cursor = addDaysToDateString(cursor, 1)
     }
   }
-  if (isNextUpcoming) {
+  return occurrencesByDate
+}
+
+function getNowISTTimeString() {
+  return new Date().toLocaleTimeString('en-GB', { timeZone: 'Asia/Kolkata', hour12: false })
+}
+
+// Five real-world states, purely by date/time — not by status:
+//   grey       — a future date (not today)
+//   light      — today, before start_time
+//   dark       — today, between start_time and end_time (genuinely happening right now)
+//   Color A    — already past, attendance predominantly qr_scan
+//   Color B    — already past, attendance predominantly manual_entry (or no records at all)
+function sessionTimeState(session, todayString, nowTimeString) {
+  const { session_date, start_time, end_time } = session
+
+  if (session_date > todayString) return 'future'
+
+  if (session_date === todayString) {
+    if (start_time && end_time && nowTimeString >= start_time && nowTimeString <= end_time) {
+      return 'ongoing'
+    }
+    if (start_time && nowTimeString < start_time) {
+      return 'today-pending'
+    }
+    if (!end_time || nowTimeString > end_time) {
+      return 'past'
+    }
+    return 'today-pending'
+  }
+
+  return 'past'
+}
+
+function sessionColorClasses(timeState, methodCounts) {
+  if (timeState === 'past') {
+    const counts = methodCounts ?? { qr_scan: 0, manual_entry: 0 }
+    const qrPredominant = counts.qr_scan > 0 && counts.qr_scan >= counts.manual_entry
+    return qrPredominant
+      ? {
+          wrapper: 'block w-full rounded border-l-2 border-sky-500 bg-sky-50 px-1.5 py-1 text-left transition hover:bg-sky-100',
+          title: 'text-sky-800',
+          subtitle: 'text-sky-700',
+        }
+      : {
+          wrapper: 'block w-full rounded border-l-2 border-violet-500 bg-violet-50 px-1.5 py-1 text-left transition hover:bg-violet-100',
+          title: 'text-violet-800',
+          subtitle: 'text-violet-700',
+        }
+  }
+  if (timeState === 'ongoing') {
     return {
-      wrapper: 'block w-full rounded border-l-2 border-red-500 bg-red-50 px-1.5 py-1 text-left transition hover:bg-red-100',
-      title: 'text-red-800',
-      subtitle: 'text-red-700',
+      wrapper: 'block w-full rounded border-l-2 border-amber-800 bg-amber-600 px-1.5 py-1 text-left transition hover:bg-amber-700',
+      title: 'text-white',
+      subtitle: 'text-amber-50',
+    }
+  }
+  if (timeState === 'today-pending') {
+    return {
+      wrapper: 'block w-full rounded border-l-2 border-amber-400 bg-amber-50 px-1.5 py-1 text-left transition hover:bg-amber-100',
+      title: 'text-amber-800',
+      subtitle: 'text-amber-700',
     }
   }
   return {
@@ -96,9 +168,21 @@ function sessionColorClasses(session, isNextUpcoming) {
   }
 }
 
+function sessionStateLabel(timeState, methodCounts) {
+  if (timeState === 'past') {
+    const counts = methodCounts ?? { qr_scan: 0, manual_entry: 0 }
+    if (counts.qr_scan === 0 && counts.manual_entry === 0) return 'No attendance recorded'
+    return counts.qr_scan >= counts.manual_entry ? 'Taken via QR' : 'Taken manually'
+  }
+  if (timeState === 'ongoing') return 'Happening now'
+  if (timeState === 'today-pending') return 'Later today'
+  return 'Upcoming'
+}
+
 export default function Professor() {
   const navigate = useNavigate()
-  const todayString = getTodayISTDateString()
+  const [todayString, setTodayString] = useState(getTodayISTDateString())
+  const [nowTimeString, setNowTimeString] = useState(getNowISTTimeString())
   const todayDate = new Date(`${todayString}T00:00:00Z`)
 
   const [viewedYear, setViewedYear] = useState(todayDate.getUTCFullYear())
@@ -109,11 +193,22 @@ export default function Professor() {
   const [nonFunctionalSlots, setNonFunctionalSlots] = useState([])
   const [myCourseIds, setMyCourseIds] = useState(null) // null = not yet resolved
   const [sessionsInView, setSessionsInView] = useState([])
-  const [attendanceMethodsBySession, setAttendanceMethodsBySession] = useState(new Map())
-  const [nextUpcomingSessionId, setNextUpcomingSessionId] = useState(null)
+  const [methodCountsBySession, setMethodCountsBySession] = useState(new Map())
   const [toast, setToast] = useState('')
 
+  // Refreshed periodically so "ongoing right now" genuinely activates/deactivates live, not
+  // just once at page load.
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setTodayString(getTodayISTDateString())
+      setNowTimeString(getNowISTTimeString())
+    }, 30000)
+    return () => clearInterval(interval)
+  }, [])
+
   // Courses and this professor's timetable_slots don't change per month view — fetched once.
+  // Only functional slots contribute to myCourseIds: a course whose slots are all
+  // non-functional (ITC) is display-layer only and should never be treated as "real."
   useEffect(() => {
     async function loadStatic() {
       const [coursesRes, slotsRes] = await Promise.all([
@@ -136,11 +231,9 @@ export default function Professor() {
       const allCourses = coursesRes.data ?? []
       const allSlots = slotsRes.data ?? []
 
-      // The professor's real, visible courses are derived strictly from their own
-      // timetable_slots rows — a course that exists in the app but isn't taught by this
-      // professor (BDC, SOM) must never show up here, even if it has real sessions of its own.
       const courseIdSet = new Set()
       for (const slot of allSlots) {
+        if (!slot.is_functional) continue
         const course = findCourseForSlot(allCourses, slot)
         if (course) courseIdSet.add(course.id)
       }
@@ -153,27 +246,10 @@ export default function Professor() {
     loadStatic()
   }, [])
 
-  // The "next upcoming" session (the single red card) is a professor-wide fact, independent of
-  // whichever month happens to be in view — fetched once myCourseIds is known, not per month.
-  useEffect(() => {
-    if (!myCourseIds || myCourseIds.size === 0) return
-
-    async function loadNextUpcoming() {
-      const { data } = await supabase
-        .from('sessions')
-        .select('id')
-        .in('course_id', [...myCourseIds])
-        .eq('status', 'not_started')
-        .gte('session_date', todayString)
-        .order('session_date', { ascending: true })
-        .order('start_time', { ascending: true, nullsFirst: false })
-        .limit(1)
-
-      setNextUpcomingSessionId(data?.[0]?.id ?? null)
-    }
-
-    loadNextUpcoming()
-  }, [myCourseIds])
+  const nonFunctionalOccurrences = useMemo(
+    () => buildNonFunctionalOccurrences(nonFunctionalSlots),
+    [nonFunctionalSlots],
+  )
 
   // Real sessions are re-fetched for whichever month is currently in view, so Back/Forward
   // navigation reaches any month, not just a fixed window from today.
@@ -197,7 +273,6 @@ export default function Professor() {
       const { data, error: sessionsError } = await supabase
         .from('sessions')
         .select('id, session_number, session_date, status, start_time, end_time, room, course_id, courses(name)')
-        .neq('status', 'cancelled')
         .gte('session_date', gridStart)
         .lte('session_date', gridEnd)
         .in('course_id', [...myCourseIds])
@@ -211,29 +286,35 @@ export default function Professor() {
       const sessions = data ?? []
       setSessionsInView(sessions)
 
-      // Only resolved (live-or-past) sessions need an attendance-method label.
-      const resolvedIds = sessions.filter((s) => RESOLVED_STATUSES.has(s.status)).map((s) => s.id)
-      if (resolvedIds.length > 0) {
+      // Only past sessions need an attendance-method breakdown — future/today sessions can't
+      // have any yet.
+      const pastIds = sessions
+        .filter((s) => sessionTimeState(s, todayString, nowTimeString) === 'past')
+        .map((s) => s.id)
+
+      if (pastIds.length > 0) {
         const { data: arData } = await supabase
           .from('attendance_records')
           .select('session_id, method')
-          .in('session_id', resolvedIds)
+          .in('session_id', pastIds)
 
-        const methodMap = new Map()
+        const counts = new Map()
         for (const row of arData ?? []) {
-          const set = methodMap.get(row.session_id) ?? new Set()
-          set.add(row.method)
-          methodMap.set(row.session_id, set)
+          const entry = counts.get(row.session_id) ?? { qr_scan: 0, manual_entry: 0 }
+          if (row.method === 'qr_scan') entry.qr_scan += 1
+          else if (row.method === 'manual_entry') entry.manual_entry += 1
+          counts.set(row.session_id, entry)
         }
-        setAttendanceMethodsBySession(methodMap)
+        setMethodCountsBySession(counts)
       } else {
-        setAttendanceMethodsBySession(new Map())
+        setMethodCountsBySession(new Map())
       }
 
       setLoading(false)
     }
 
     loadSessions()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [viewedYear, viewedMonth, myCourseIds])
 
   useEffect(() => {
@@ -336,10 +417,11 @@ export default function Professor() {
         </p>
 
         <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1.5 border-t border-gray-100 pt-3 text-xs text-gray-500">
-          <LegendSwatch className="bg-gray-100 border-gray-400" label="Upcoming" />
-          <LegendSwatch className="bg-red-50 border-red-500" label="Next up" />
-          <LegendSwatch className="bg-sky-50 border-sky-500" label="Resolved (QR / manual)" />
-          <LegendSwatch className="bg-gray-100 border-gray-300 opacity-60" label="Cancelled" />
+          <LegendSwatch className="bg-gray-100 border-gray-400" label="Future" />
+          <LegendSwatch className="bg-amber-50 border-amber-400" label="Today · not started" />
+          <LegendSwatch className="bg-amber-600 border-amber-800" label="Today · ongoing" />
+          <LegendSwatch className="bg-sky-50 border-sky-500" label="Ended · mostly QR" />
+          <LegendSwatch className="bg-violet-50 border-violet-500" label="Ended · mostly manual" />
         </div>
       </Card>
 
@@ -360,10 +442,16 @@ export default function Professor() {
               const inCurrentMonth = Number(date.slice(5, 7)) - 1 === viewedMonth
               const isToday = date === todayString
               const dayNumber = Number(date.slice(8, 10))
-              const weekday = dayAbbrevForDateString(date)
 
               const realSessions = sessionsByDate.get(date) ?? []
-              const demoOccurrences = nonFunctionalSlots.filter((slot) => slot.day_of_week === weekday)
+              const demoOccurrences = nonFunctionalOccurrences.get(date) ?? []
+
+              // Merged and sorted by start_time ascending, real and demo entries mixed by
+              // actual time of day rather than shown as two separate groups.
+              const entries = [
+                ...realSessions.map((session) => ({ kind: 'real', time: session.start_time ?? '99:99:99', session })),
+                ...demoOccurrences.map((occ) => ({ kind: 'demo', time: occ.slot.start_time ?? '99:99:99', occ })),
+              ].sort((a, b) => a.time.localeCompare(b.time))
 
               return (
                 <div
@@ -385,11 +473,36 @@ export default function Professor() {
                   </p>
 
                   <div className="mt-1 space-y-1">
-                    {realSessions.map((session) => {
-                      const isNextUpcoming = session.id === nextUpcomingSessionId
-                      const colors = sessionColorClasses(session, isNextUpcoming)
-                      const isResolved = RESOLVED_STATUSES.has(session.status)
+                    {entries.map((entry) => {
+                      if (entry.kind === 'demo') {
+                        const { slot, number } = entry.occ
+                        return (
+                          <button
+                            key={`${slot.id}-${date}`}
+                            type="button"
+                            onClick={() => setToast('Not enabled for this prototype demo')}
+                            className="block w-full rounded bg-gray-100 px-1.5 py-1 text-left"
+                          >
+                            <p className="truncate text-[11px] font-medium text-gray-500">
+                              {slot.course_name} · {slot.section} · S{number}
+                            </p>
+                            <p className="truncate text-[10px] text-gray-400">
+                              {formatTimeRange(slot.start_time, slot.end_time)}
+                              {slot.room ? ` · ${slot.room}` : ''}
+                            </p>
+                            {otherCourseLabel(slot, courses) && (
+                              <p className="truncate text-[9px] text-indigo-500">{otherCourseLabel(slot, courses)}</p>
+                            )}
+                          </button>
+                        )
+                      }
+
+                      const session = entry.session
+                      const timeState = sessionTimeState(session, todayString, nowTimeString)
+                      const counts = methodCountsBySession.get(session.id)
+                      const colors = sessionColorClasses(timeState, counts)
                       const sectionSuffix = courseSectionSuffix(session.courses?.name ?? '')
+
                       return (
                         <button
                           key={session.id}
@@ -407,35 +520,11 @@ export default function Professor() {
                             {session.room ? ` · ${session.room}` : ''}
                           </p>
                           <p className={`truncate text-[9px] font-medium ${colors.subtitle}`}>
-                            {isResolved
-                              ? attendanceLabelFor(session, attendanceMethodsBySession)
-                              : isNextUpcoming
-                                ? 'Next up'
-                                : 'Upcoming'}
+                            {sessionStateLabel(timeState, counts)}
                           </p>
                         </button>
                       )
                     })}
-
-                    {demoOccurrences.map((slot) => (
-                      <button
-                        key={slot.id}
-                        type="button"
-                        onClick={() => setToast('Not enabled for this prototype demo')}
-                        className="block w-full rounded bg-gray-100 px-1.5 py-1 text-left"
-                      >
-                        <p className="truncate text-[11px] font-medium text-gray-500">
-                          {slot.course_name} · {slot.section}
-                        </p>
-                        <p className="truncate text-[10px] text-gray-400">
-                          {formatTimeRange(slot.start_time, slot.end_time)}
-                          {slot.room ? ` · ${slot.room}` : ''}
-                        </p>
-                        {otherCourseLabel(slot, courses) && (
-                          <p className="truncate text-[9px] text-indigo-500">{otherCourseLabel(slot, courses)}</p>
-                        )}
-                      </button>
-                    ))}
                   </div>
                 </div>
               )

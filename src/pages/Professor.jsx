@@ -11,6 +11,11 @@ import {
   getTodayISTDateString,
 } from '../lib/dateFormat.js'
 import { courseSectionSuffix, courseShortCode, findCourseForSlot } from '../lib/csv.js'
+import {
+  buildProfessorScopeOptions,
+  encodeSectionScope,
+  encodeSubjectScope,
+} from '../lib/anomalyScope.js'
 import UserMenu from '../components/UserMenu.jsx'
 
 // This professor's real, visible courses are derived strictly from timetable_slots rows
@@ -229,10 +234,12 @@ export default function Professor() {
   const [error, setError] = useState('')
   const [courses, setCourses] = useState([])
   const [nonFunctionalSlots, setNonFunctionalSlots] = useState([])
+  const [mySlots, setMySlots] = useState([])
   const [myCourseIds, setMyCourseIds] = useState(null) // null = not yet resolved
   const [sessionsInView, setSessionsInView] = useState([])
   const [methodCountsBySession, setMethodCountsBySession] = useState(new Map())
   const [toast, setToast] = useState('')
+  const [anomalyScope, setAnomalyScope] = useState('all')
 
   // Refreshed periodically so "ongoing right now" genuinely activates/deactivates live, not
   // just once at page load.
@@ -280,6 +287,7 @@ export default function Professor() {
 
       setCourses(allCourses)
       setNonFunctionalSlots(allSlots.filter((s) => !s.is_functional))
+      setMySlots(allSlots)
       setMyCourseIds(courseIdSet)
     }
 
@@ -290,6 +298,8 @@ export default function Professor() {
     () => buildNonFunctionalOccurrences(nonFunctionalSlots),
     [nonFunctionalSlots],
   )
+
+  const anomalyScopeOptions = useMemo(() => buildProfessorScopeOptions(courses, mySlots), [courses, mySlots])
 
   // Real sessions are re-fetched for whichever month is currently in view, so Back/Forward
   // navigation reaches any month, not just a fixed window from today.
@@ -472,6 +482,44 @@ export default function Professor() {
           <LegendSwatch className="bg-violet-50 border-violet-500" label="Ended · mostly manual" />
         </div>
       </Card>
+
+      <div className="mt-6 rounded-xl bg-white p-6 shadow-sm sm:p-8">
+        <h2 className="text-base font-semibold text-gray-900">Anomaly Detection</h2>
+        <p className="mt-1 text-sm text-gray-500">
+          Pick a scope, then run the check. ITC is included as a valid scope even though it has no
+          real data of its own — it will always report no anomalies.
+        </p>
+        <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center">
+          <select
+            value={anomalyScope}
+            onChange={(e) => setAnomalyScope(e.target.value)}
+            className="w-full rounded-lg border border-gray-300 px-3.5 py-2.5 text-gray-900 outline-none transition focus:border-maroon-600 focus:ring-2 focus:ring-maroon-100 sm:w-auto"
+          >
+            <option value="all">All my courses</option>
+            <optgroup label="By subject">
+              {anomalyScopeOptions.subjects.map((s) => (
+                <option key={s.shortCode} value={encodeSubjectScope(s.shortCode)}>
+                  {s.shortCode}
+                </option>
+              ))}
+            </optgroup>
+            <optgroup label="By section">
+              {anomalyScopeOptions.sections.map((s) => (
+                <option key={s.courseId} value={encodeSectionScope(s.courseId)}>
+                  {s.label}
+                </option>
+              ))}
+            </optgroup>
+          </select>
+          <button
+            type="button"
+            onClick={() => navigate(`/professor/anomalies?scope=${encodeURIComponent(anomalyScope)}`)}
+            className="shrink-0 rounded-lg bg-maroon-600 px-6 py-2.5 text-sm font-medium text-white transition hover:bg-maroon-700"
+          >
+            Run Anomaly Check
+          </button>
+        </div>
+      </div>
 
       <div className="mt-6 overflow-hidden rounded-xl bg-white shadow-sm">
         <div className="grid grid-cols-7 border-b border-gray-100 bg-gray-50">

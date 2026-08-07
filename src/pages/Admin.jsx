@@ -26,6 +26,13 @@ import {
 } from '../lib/dateFormat.js'
 import { courseSectionSuffix, courseShortCode, downloadCsv, rowsToCsv } from '../lib/csv.js'
 import UserMenu from '../components/UserMenu.jsx'
+import AnomalyReport from '../components/AnomalyReport.jsx'
+
+// Sentinel selectedCourseId value for the "All courses" toggle — deliberately not a real
+// course id, so `courses.find(c => c.id === selectedCourseId)` naturally resolves to null and
+// every per-course section (roster, timetable, sessions, analytics) just no-ops, exactly like
+// the brief window before a real course is selected on first load.
+const ALL_COURSES_SCOPE = 'ALL'
 
 // There's no professors table to look this up from, so the small, fixed set of real
 // professor logins is enumerated here for the slot form's picker — this is the one place
@@ -168,6 +175,7 @@ export default function Admin() {
   const [methodBreakdown, setMethodBreakdown] = useState([])
 
   const selectedCourse = courses.find((c) => c.id === selectedCourseId) ?? null
+  const showingAllCourses = selectedCourseId === ALL_COURSES_SCOPE
 
   useEffect(() => {
     if (!user) return
@@ -965,17 +973,29 @@ export default function Admin() {
           <div>
             <p className="text-sm font-medium text-maroon-600">Admin Dashboard</p>
             <h1 className="mt-1 text-2xl font-bold text-gray-900 sm:text-3xl">
-              {selectedCourse.name}
+              {showingAllCourses ? 'All Courses' : selectedCourse.name}
             </h1>
             <p className="mt-2 text-sm text-gray-500">
-              {selectedCourse.professor_name} · {students.length} students ·{' '}
-              {selectedCourse.total_sessions} sessions planned
+              {showingAllCourses
+                ? `${courses.length} courses · every course in the system`
+                : `${selectedCourse.professor_name} · ${students.length} students · ${selectedCourse.total_sessions} sessions planned`}
             </p>
           </div>
           <UserMenu />
         </div>
 
         <div className="mt-6 flex flex-wrap items-center gap-2 border-t border-gray-100 pt-4">
+          <button
+            type="button"
+            onClick={() => setSelectedCourseId(ALL_COURSES_SCOPE)}
+            className={`rounded-lg px-4 py-2 text-sm font-medium transition ${
+              showingAllCourses
+                ? 'bg-maroon-600 text-white'
+                : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+            }`}
+          >
+            All courses
+          </button>
           {courses.map((c) => (
             <button
               key={c.id}
@@ -1011,23 +1031,33 @@ export default function Admin() {
           />
         )}
 
-        <div className="mt-4 flex flex-wrap items-center gap-3">
-          <button
-            type="button"
-            onClick={handleExportCourse}
-            disabled={exportingCourse}
-            className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-600 transition hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            {exportingCourse ? 'Preparing CSV…' : 'Download Full Course Attendance (CSV)'}
-          </button>
-          {exportError && (
-            <p role="alert" className="text-sm text-red-700">
-              {exportError}
-            </p>
-          )}
-        </div>
+        {!showingAllCourses && selectedCourse && (
+          <div className="mt-4 flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              onClick={handleExportCourse}
+              disabled={exportingCourse}
+              className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-600 transition hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {exportingCourse ? 'Preparing CSV…' : 'Download Full Course Attendance (CSV)'}
+            </button>
+            {exportError && (
+              <p role="alert" className="text-sm text-red-700">
+                {exportError}
+              </p>
+            )}
+          </div>
+        )}
       </Card>
 
+      <AnomalyReport
+        courses={courses}
+        courseIds={showingAllCourses ? null : selectedCourse ? [selectedCourse.id] : []}
+        scopeLabel={showingAllCourses ? 'All courses' : (selectedCourse?.name ?? 'Loading…')}
+      />
+
+      {!showingAllCourses && selectedCourse && (
+        <>
       <div className="mt-6 rounded-xl bg-white p-6 shadow-sm sm:p-8">
         <h2 className="text-base font-semibold text-gray-900">Settings</h2>
         <p className="mt-1 text-sm text-gray-500">
@@ -1599,6 +1629,8 @@ export default function Admin() {
           </div>
         )}
       </div>
+        </>
+      )}
     </PageShell>
   )
 }

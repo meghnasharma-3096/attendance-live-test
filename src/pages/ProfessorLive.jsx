@@ -619,12 +619,6 @@ export default function ProfessorLive() {
             <p className="mt-1 text-sm text-gray-500">{course.name}</p>
           </div>
           <div className="flex shrink-0 flex-col items-end gap-3">
-            <Link
-              to="/professor/anomalies"
-              className="text-sm font-medium text-maroon-600 hover:text-maroon-700"
-            >
-              View Anomalies →
-            </Link>
             <UserMenu />
           </div>
         </div>

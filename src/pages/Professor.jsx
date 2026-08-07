@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { CalendarDays, ChevronLeft, ChevronRight } from 'lucide-react'
+import { useAuth } from '../context/AuthContext.jsx'
 import { supabase, fetchAllRows } from '../lib/supabaseClient.js'
 import {
   addDaysToDateString,
@@ -10,13 +11,12 @@ import {
   getTodayISTDateString,
 } from '../lib/dateFormat.js'
 import { courseSectionSuffix, courseShortCode, findCourseForSlot } from '../lib/csv.js'
-import { PROFESSOR_IDENTIFIER } from '../lib/constants.js'
 import UserMenu from '../components/UserMenu.jsx'
 
 // This professor's real, visible courses are derived strictly from timetable_slots rows
-// tagged with PROFESSOR_IDENTIFIER — not "every course that happens to exist," so a course
-// this professor doesn't teach (BDC, SOM) never appears here even if it has real sessions of
-// its own elsewhere in the app.
+// tagged with the logged-in professor's own identifier — not "every course that happens to
+// exist," so a course this professor doesn't teach (e.g. prof_bdc seeing DTAI) never appears
+// here even if it has real sessions of its own elsewhere in the app.
 const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 
 // ITC has never had a real course entity — only non-functional timetable_slots — so its
@@ -215,6 +215,7 @@ function demoAttendanceCounts(date, section) {
 
 export default function Professor() {
   const navigate = useNavigate()
+  const { user } = useAuth()
   // TEMPORARY: calendarTodayISTDateString()/calendarNowISTTimeString() below use
   // TESTING_SIMULATED_NOW — restore to getTodayISTDateString()/getNowISTTimeString() when
   // removing the override.
@@ -255,7 +256,7 @@ export default function Professor() {
         supabase
           .from('timetable_slots')
           .select('id, day_of_week, start_time, end_time, course_name, section, room, is_functional')
-          .eq('professor_identifier', PROFESSOR_IDENTIFIER),
+          .eq('professor_identifier', user.identifier),
       ])
 
       if (coursesRes.error) {
@@ -283,7 +284,7 @@ export default function Professor() {
     }
 
     loadStatic()
-  }, [])
+  }, [user.identifier])
 
   const nonFunctionalOccurrences = useMemo(
     () => buildNonFunctionalOccurrences(nonFunctionalSlots),

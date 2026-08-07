@@ -25,8 +25,17 @@ import {
   nextOccurrenceOfDay,
 } from '../lib/dateFormat.js'
 import { courseSectionSuffix, courseShortCode, downloadCsv, rowsToCsv } from '../lib/csv.js'
-import { PROFESSOR_IDENTIFIER } from '../lib/constants.js'
 import UserMenu from '../components/UserMenu.jsx'
+
+// There's no professors table to look this up from, so the small, fixed set of real
+// professor logins is enumerated here for the slot form's picker — this is the one place
+// admin has to say who a timetable slot belongs to (courses/sessions don't carry this
+// themselves; only timetable_slots.professor_identifier does).
+const PROFESSOR_OPTIONS = [
+  { value: 'prof_dtai_itc', label: 'DTAI + ITC (prof_dtai_itc)' },
+  { value: 'prof_bdc', label: 'BDC (prof_bdc)' },
+  { value: 'prof_som', label: 'SOM (prof_som)' },
+]
 
 const DISTRIBUTION_BAND_COLORS = {
   '90-100%': '#22c55e',
@@ -72,8 +81,16 @@ function timeRangesOverlap(aStart, aEnd, bStart, bEnd) {
   return timeToMinutes(aStart) < timeToMinutes(bEnd) && timeToMinutes(bStart) < timeToMinutes(aEnd)
 }
 
-function emptySlotForm() {
-  return { day_of_week: 'Mon', start_time: '10:30', end_time: '12:00', section: '', room: '', is_functional: false }
+function emptySlotForm(defaultProfessorIdentifier) {
+  return {
+    day_of_week: 'Mon',
+    start_time: '10:30',
+    end_time: '12:00',
+    section: '',
+    room: '',
+    is_functional: false,
+    professor_identifier: defaultProfessorIdentifier ?? PROFESSOR_OPTIONS[0].value,
+  }
 }
 
 function emptyCourseForm() {
@@ -505,7 +522,7 @@ export default function Admin() {
     const sectionSuffix = courseSectionSuffix(course.name)
     let slotsQuery = supabase
       .from('timetable_slots')
-      .select('id, day_of_week, start_time, end_time, section, room, is_functional')
+      .select('id, day_of_week, start_time, end_time, section, room, is_functional, professor_identifier')
       .eq('course_name', shortCode)
     if (sectionSuffix) {
       slotsQuery = slotsQuery.eq('section', sectionSuffix)
@@ -529,7 +546,9 @@ export default function Admin() {
 
   function handleOpenAddSlot() {
     setEditingSlotId(null)
-    setSlotForm(emptySlotForm())
+    // Default to whichever professor this course's other slots already use, so adding a
+    // second/third slot to an already-set-up course doesn't require reselecting each time.
+    setSlotForm(emptySlotForm(timetableSlots[0]?.professor_identifier))
     setSlotFormError('')
     setTimetableMessage(null)
     setSlotFormOpen(true)
@@ -544,6 +563,7 @@ export default function Admin() {
       section: slot.section,
       room: slot.room,
       is_functional: slot.is_functional,
+      professor_identifier: slot.professor_identifier,
     })
     setSlotFormError('')
     setTimetableMessage(null)
@@ -559,10 +579,15 @@ export default function Admin() {
   async function handleSaveSlot() {
     setSlotFormError('')
 
-    const { day_of_week, start_time, end_time, section, room, is_functional } = slotForm
+    const { day_of_week, start_time, end_time, section, room, is_functional, professor_identifier } = slotForm
 
     if (!section.trim() || !room.trim()) {
       setSlotFormError('Section and room are required.')
+      return
+    }
+
+    if (!professor_identifier) {
+      setSlotFormError('Professor is required.')
       return
     }
 
@@ -588,7 +613,7 @@ export default function Admin() {
       section: section.trim(),
       room: room.trim(),
       is_functional,
-      professor_identifier: PROFESSOR_IDENTIFIER,
+      professor_identifier,
     }
 
     const { error: saveError } = editingSlotId
@@ -1727,6 +1752,21 @@ function SlotForm({ form, onChange, isEditing, onSave, onDelete, onCancel, savin
             placeholder="e.g. CR-107"
             className="mt-1 w-full rounded-lg border border-gray-300 px-3.5 py-2.5 text-gray-900 outline-none transition focus:border-maroon-600 focus:ring-2 focus:ring-maroon-100"
           />
+        </div>
+
+        <div>
+          <label className="text-sm font-medium text-gray-700">Professor</label>
+          <select
+            value={form.professor_identifier}
+            onChange={(e) => setField('professor_identifier', e.target.value)}
+            className="mt-1 w-full rounded-lg border border-gray-300 px-3.5 py-2.5 text-gray-900 outline-none transition focus:border-maroon-600 focus:ring-2 focus:ring-maroon-100"
+          >
+            {PROFESSOR_OPTIONS.map((p) => (
+              <option key={p.value} value={p.value}>
+                {p.label}
+              </option>
+            ))}
+          </select>
         </div>
       </div>
 

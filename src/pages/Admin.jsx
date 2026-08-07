@@ -16,7 +16,7 @@ import {
   YAxis,
 } from 'recharts'
 import { useAuth } from '../context/AuthContext.jsx'
-import { supabase } from '../lib/supabaseClient.js'
+import { supabase, fetchAllRows } from '../lib/supabaseClient.js'
 import {
   addDaysToDateString,
   formatDateIST,
@@ -263,10 +263,16 @@ export default function Admin() {
 
     let attendanceRows = []
     if (sessionIds.length > 0) {
-      const { data, error: attendanceErr } = await supabase
-        .from('attendance_records')
-        .select('student_pgp_id, session_id, method')
-        .in('session_id', sessionIds)
+      // Paginated — a single un-paginated fetch silently truncates at PostgREST's default
+      // 1000-row cap once a course accumulates enough conducted sessions with real attendance
+      // (e.g. 20 sessions x ~68 students), which would skew these charts without ever erroring.
+      const { data, error: attendanceErr } = await fetchAllRows(() =>
+        supabase
+          .from('attendance_records')
+          .select('student_pgp_id, session_id, method')
+          .in('session_id', sessionIds)
+          .order('id', { ascending: true }),
+      )
 
       if (attendanceErr) {
         setAnalyticsError(attendanceErr.message)
@@ -861,10 +867,15 @@ export default function Admin() {
 
     let attendedPairs = new Set()
     if (sessionIds.length > 0) {
-      const { data: attendanceData, error: attendanceError } = await supabase
-        .from('attendance_records')
-        .select('student_pgp_id, session_id')
-        .in('session_id', sessionIds)
+      // Paginated for the same reason as loadAnalytics above — a full course export can easily
+      // exceed 1000 rows once every session has real attendance.
+      const { data: attendanceData, error: attendanceError } = await fetchAllRows(() =>
+        supabase
+          .from('attendance_records')
+          .select('student_pgp_id, session_id')
+          .in('session_id', sessionIds)
+          .order('id', { ascending: true }),
+      )
 
       if (attendanceError) {
         setExportingCourse(false)

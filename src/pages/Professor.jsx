@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { CalendarDays, ChevronLeft, ChevronRight } from 'lucide-react'
-import { supabase } from '../lib/supabaseClient.js'
+import { supabase, fetchAllRows } from '../lib/supabaseClient.js'
 import {
   addDaysToDateString,
   dayAbbrevForDateString,
@@ -293,10 +293,18 @@ export default function Professor() {
         .map((s) => s.id)
 
       if (pastIds.length > 0) {
-        const { data: arData } = await supabase
-          .from('attendance_records')
-          .select('session_id, method')
-          .in('session_id', pastIds)
+        // Fetched with explicit pagination — a plain, un-paginated fetch here silently drops
+        // rows past PostgREST's default 1000-row cap once enough past sessions accumulate in
+        // one month's view, and non-deterministically so (no natural order otherwise), which is
+        // exactly what caused the same session to show different attendance status depending on
+        // which month happened to be open.
+        const { data: arData } = await fetchAllRows(() =>
+          supabase
+            .from('attendance_records')
+            .select('session_id, method')
+            .in('session_id', pastIds)
+            .order('id', { ascending: true }),
+        )
 
         const counts = new Map()
         for (const row of arData ?? []) {
@@ -476,22 +484,35 @@ export default function Professor() {
                     {entries.map((entry) => {
                       if (entry.kind === 'demo') {
                         const { slot, number } = entry.occ
+                        // Same date-based coloring as a real session — built from this specific
+                        // occurrence's date and the slot's fixed time, since a demo entry has no
+                        // status of its own to key off. It never has real attendance_records, so
+                        // a "past" occurrence always falls to the "no records" treatment.
+                        const demoTimeState = sessionTimeState(
+                          { session_date: date, start_time: slot.start_time, end_time: slot.end_time },
+                          todayString,
+                          nowTimeString,
+                        )
+                        const colors = sessionColorClasses(demoTimeState, undefined)
                         return (
                           <button
                             key={`${slot.id}-${date}`}
                             type="button"
                             onClick={() => setToast('Not enabled for this prototype demo')}
-                            className="block w-full rounded bg-gray-100 px-1.5 py-1 text-left"
+                            className={colors.wrapper}
                           >
-                            <p className="truncate text-[11px] font-medium text-gray-500">
-                              {slot.course_name} · {slot.section} · S{number}
+                            <p className={`truncate text-[11px] font-semibold ${colors.title}`}>
+                              {slot.course_name} · {slot.section} · S{number} (Demo)
                             </p>
-                            <p className="truncate text-[10px] text-gray-400">
+                            <p className={`truncate text-[10px] ${colors.subtitle}`}>
                               {formatTimeRange(slot.start_time, slot.end_time)}
                               {slot.room ? ` · ${slot.room}` : ''}
                             </p>
+                            <p className={`truncate text-[9px] font-medium ${colors.subtitle}`}>
+                              {sessionStateLabel(demoTimeState, undefined)}
+                            </p>
                             {otherCourseLabel(slot, courses) && (
-                              <p className="truncate text-[9px] text-indigo-500">{otherCourseLabel(slot, courses)}</p>
+                              <p className={`truncate text-[9px] ${colors.subtitle}`}>{otherCourseLabel(slot, courses)}</p>
                             )}
                           </button>
                         )

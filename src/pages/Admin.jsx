@@ -625,7 +625,7 @@ export default function Admin() {
       section: section.trim(),
       room: room.trim(),
       is_functional,
-      professor_identifier: 'prof_dtai',
+      professor_identifier: 'prof',
     }
 
     const { error: saveError } = editingSlotId

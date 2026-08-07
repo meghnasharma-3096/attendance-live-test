@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext.jsx'
 import { supabase } from '../lib/supabaseClient.js'
-import { formatDateIST, getTodayISTDateString } from '../lib/dateFormat.js'
+import { formatDateIST, formatTimeRange, getTodayISTDateString } from '../lib/dateFormat.js'
 import UserMenu from '../components/UserMenu.jsx'
 import QrScanner from '../components/QrScanner.jsx'
 
@@ -70,7 +70,7 @@ export default function CourseDetail() {
 
       const { data: sessionsData, error: sessionsError } = await supabase
         .from('sessions')
-        .select('id, session_number, session_date, status, cancellation_reason')
+        .select('id, session_number, session_date, start_time, end_time, room, status, cancellation_reason')
         .eq('course_id', courseId)
         .order('session_number')
 
@@ -105,6 +105,9 @@ export default function CourseDetail() {
           id: s.id,
           session_number: s.session_number,
           session_date: s.session_date,
+          start_time: s.start_time,
+          end_time: s.end_time,
+          room: s.room,
           status: s.status,
           cancellation_reason: s.cancellation_reason,
           attended: record !== null,
@@ -259,6 +262,8 @@ export default function CourseDetail() {
               <tr className="border-b border-gray-100 text-xs font-medium tracking-wide text-gray-500 uppercase">
                 <th className="px-6 py-3">Session #</th>
                 <th className="px-6 py-3">Date</th>
+                <th className="px-6 py-3">Time</th>
+                <th className="px-6 py-3">Room</th>
                 <th className="px-6 py-3">Status</th>
               </tr>
             </thead>
@@ -267,6 +272,10 @@ export default function CourseDetail() {
                 <tr key={row.id} className={i % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
                   <td className="px-6 py-3 font-medium text-gray-900">{row.session_number}</td>
                   <td className="px-6 py-3 text-gray-600">{displaySessionDate(row)}</td>
+                  <td className="px-6 py-3 text-gray-600">
+                    {formatTimeRange(row.start_time, row.end_time) ?? '—'}
+                  </td>
+                  <td className="px-6 py-3 text-gray-600">{row.room ?? '—'}</td>
                   <td className="px-6 py-3">
                     {row.status === 'not_started' ? (
                       <span className="inline-flex rounded-full bg-gray-100 px-2.5 py-1 text-xs font-medium text-gray-600">

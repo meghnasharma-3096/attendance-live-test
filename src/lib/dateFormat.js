@@ -17,6 +17,11 @@ export function formatDateIST(dateString) {
   })
 }
 
+export function formatTimeRange(startTime, endTime) {
+  if (!startTime || !endTime) return null
+  return `${startTime.slice(0, 5)}–${endTime.slice(0, 5)}`
+}
+
 export function formatDateTimeIST(timestamp) {
   return new Date(timestamp).toLocaleString('en-IN', {
     timeZone: IST_TIME_ZONE,

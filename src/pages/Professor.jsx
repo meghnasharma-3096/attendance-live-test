@@ -2,7 +2,14 @@ import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { CalendarDays } from 'lucide-react'
 import { supabase } from '../lib/supabaseClient.js'
-import { dateForDayInWeekOf, getTodayISTDateString, getTodayISTDayAbbrev } from '../lib/dateFormat.js'
+import {
+  addDaysToDateString,
+  dateForDayInWeekOf,
+  formatDateIST,
+  formatTimeRange,
+  getTodayISTDateString,
+  getTodayISTDayAbbrev,
+} from '../lib/dateFormat.js'
 import { courseShortCode } from '../lib/csv.js'
 import UserMenu from '../components/UserMenu.jsx'
 
@@ -15,10 +22,7 @@ import UserMenu from '../components/UserMenu.jsx'
 // like a data bug. See ARCHITECTURE_NOTES.md for the fuller explanation.
 const PROFESSOR_IDENTIFIER = 'prof_dtai'
 const DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
-
-function formatTimeRange(startTime, endTime) {
-  return `${startTime.slice(0, 5)}–${endTime.slice(0, 5)}`
-}
+const UPCOMING_WINDOW_DAYS = 14
 
 function otherCourseLabel(slot, courses) {
   if (slot.course_name === 'DTAI') return null
@@ -33,6 +37,7 @@ export default function Professor() {
   const [error, setError] = useState('')
   const [slots, setSlots] = useState([])
   const [courses, setCourses] = useState([])
+  const [upcomingSessions, setUpcomingSessions] = useState([])
   const [resolvingSlotId, setResolvingSlotId] = useState(null)
   const [toast, setToast] = useState('')
 
@@ -43,13 +48,26 @@ export default function Professor() {
       setLoading(true)
       setError('')
 
-      const [slotsRes, coursesRes] = await Promise.all([
+      const todayString = getTodayISTDateString()
+
+      const [slotsRes, coursesRes, upcomingRes] = await Promise.all([
         supabase
           .from('timetable_slots')
           .select('id, day_of_week, start_time, end_time, course_name, section, room, is_functional')
           .eq('professor_identifier', PROFESSOR_IDENTIFIER)
           .order('start_time'),
         supabase.from('courses').select('id, name, professor_name'),
+        // Slot/weekday matching breaks the moment a session is rescheduled to a different day
+        // than its usual slot — this queries sessions directly by real date instead, so a
+        // rescheduled or admin-created session is always reachable regardless of what day it
+        // now falls on. Additive to the weekly grid above, not a replacement for it.
+        supabase
+          .from('sessions')
+          .select('id, session_number, session_date, status, start_time, end_time, room, course_id, courses(name)')
+          .neq('status', 'cancelled')
+          .gte('session_date', todayString)
+          .lte('session_date', addDaysToDateString(todayString, UPCOMING_WINDOW_DAYS))
+          .order('session_date'),
       ])
 
       if (slotsRes.error) {
@@ -62,9 +80,15 @@ export default function Professor() {
         setLoading(false)
         return
       }
+      if (upcomingRes.error) {
+        setError(upcomingRes.error.message)
+        setLoading(false)
+        return
+      }
 
       setSlots(slotsRes.data ?? [])
       setCourses(coursesRes.data ?? [])
+      setUpcomingSessions(upcomingRes.data ?? [])
       setLoading(false)
     }
 
@@ -152,6 +176,46 @@ export default function Professor() {
           <UserMenu />
         </div>
       </Card>
+
+      <div className="mt-6 rounded-xl bg-white p-6 shadow-sm sm:p-8">
+        <h2 className="text-base font-semibold text-gray-900">Upcoming Sessions</h2>
+        <p className="mt-1 text-sm text-gray-500">
+          Every session in the next {UPCOMING_WINDOW_DAYS} days, by real date — including anything
+          rescheduled off its usual weekly slot. Independent of the calendar grid below.
+        </p>
+
+        {upcomingSessions.length === 0 ? (
+          <p className="mt-4 text-sm text-gray-400">No sessions scheduled in this window.</p>
+        ) : (
+          <div className="mt-4 divide-y divide-gray-100 overflow-hidden rounded-lg border border-gray-100">
+            {upcomingSessions.map((session) => {
+              const timeRange = formatTimeRange(session.start_time, session.end_time)
+              return (
+                <button
+                  key={session.id}
+                  type="button"
+                  onClick={() => navigate(`/professor/live/${session.id}`)}
+                  className="flex w-full flex-wrap items-center justify-between gap-x-4 gap-y-1 px-4 py-3 text-left transition hover:bg-maroon-50"
+                >
+                  <div>
+                    <p className="text-sm font-semibold text-gray-900">
+                      {session.courses?.name ?? 'Unknown course'} · Session {session.session_number}
+                    </p>
+                    <p className="mt-0.5 text-xs text-gray-500">
+                      {formatDateIST(session.session_date)}
+                      {timeRange ? ` · ${timeRange}` : ' · Time TBD'}
+                      {session.room ? ` · ${session.room}` : ''}
+                    </p>
+                  </div>
+                  <span className="shrink-0 rounded-full bg-gray-100 px-2.5 py-1 text-xs font-medium text-gray-600">
+                    {session.status === 'not_started' ? 'Not started' : session.status}
+                  </span>
+                </button>
+              )
+            })}
+          </div>
+        )}
+      </div>
 
       <div className="mt-6 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-7">
         {DAYS.map((day, i) => {

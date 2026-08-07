@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
 import {
   Bar,
   BarChart,
@@ -19,6 +20,7 @@ import { supabase } from '../lib/supabaseClient.js'
 import {
   addDaysToDateString,
   formatDateIST,
+  formatTimeRange,
   getTodayISTDateString,
   nextOccurrenceOfDay,
 } from '../lib/dateFormat.js'
@@ -79,6 +81,15 @@ function emptyCourseForm() {
   return { name: '', professor_name: '', total_sessions: '20', default_qr_duration_seconds: '60' }
 }
 
+function rescheduleFormFromSession(session) {
+  return {
+    session_date: session.session_date,
+    start_time: session.start_time ? session.start_time.slice(0, 5) : '',
+    end_time: session.end_time ? session.end_time.slice(0, 5) : '',
+    room: session.room ?? '',
+  }
+}
+
 export default function Admin() {
   const { user } = useAuth()
   const [loading, setLoading] = useState(true)
@@ -131,6 +142,13 @@ export default function Admin() {
   const [cancelReasonInput, setCancelReasonInput] = useState('')
   const [cancelling, setCancelling] = useState(false)
   const [cancelError, setCancelError] = useState('')
+
+  const [reschedulingSessionNumber, setReschedulingSessionNumber] = useState(null)
+  const [rescheduleForm, setRescheduleForm] = useState(null)
+  const [rescheduling, setRescheduling] = useState(false)
+  const [rescheduleError, setRescheduleError] = useState('')
+
+  const [markingOfflineSessionNumber, setMarkingOfflineSessionNumber] = useState(null)
 
   const [analyticsLoading, setAnalyticsLoading] = useState(true)
   const [analyticsError, setAnalyticsError] = useState('')
@@ -192,6 +210,10 @@ export default function Admin() {
     setCancellingSessionNumber(null)
     setCancelReasonInput('')
     setCancelError('')
+    setReschedulingSessionNumber(null)
+    setRescheduleForm(null)
+    setRescheduleError('')
+    setMarkingOfflineSessionNumber(null)
 
     async function loadSessions() {
       setSessionsLoading(true)
@@ -200,7 +222,7 @@ export default function Admin() {
       const { data, error: sessionsErr } = await supabase
         .from('sessions')
         .select(
-          'id, session_number, session_date, status, current_phase, timing_config, mid_class_enabled, cancellation_reason',
+          'id, session_number, session_date, start_time, end_time, room, status, current_phase, timing_config, mid_class_enabled, cancellation_reason',
         )
         .eq('course_id', selectedCourse.id)
         .order('session_number')
@@ -336,7 +358,7 @@ export default function Admin() {
       .update({ status: 'cancelled', cancellation_reason: cancelReasonInput.trim() || null })
       .eq('id', session.id)
       .select(
-        'id, session_number, session_date, status, current_phase, timing_config, mid_class_enabled, cancellation_reason',
+        'id, session_number, session_date, start_time, end_time, room, status, current_phase, timing_config, mid_class_enabled, cancellation_reason',
       )
       .single()
 
@@ -349,6 +371,102 @@ export default function Admin() {
 
     setSessions((prev) => prev.map((s) => (s.id === data.id ? data : s)))
     handleCloseCancelForm()
+  }
+
+  function handleOpenRescheduleForm(session) {
+    setReschedulingSessionNumber(session.session_number)
+    setRescheduleForm(rescheduleFormFromSession(session))
+    setRescheduleError('')
+  }
+
+  function handleCloseRescheduleForm() {
+    setReschedulingSessionNumber(null)
+    setRescheduleForm(null)
+    setRescheduleError('')
+  }
+
+  // A genuine override: once saved, this session's date/time/room live directly on its own
+  // row, fully decoupled from the timetable_slot it was originally generated from. Re-running
+  // "Generate Upcoming Sessions" never touches existing rows, so this can't be clobbered later.
+  // Rescheduling a previously-cancelled session (e.g. a holiday class moved to a makeup slot)
+  // deliberately brings it back to 'not_started' and clears the cancellation reason — there's
+  // still no generic "un-cancel" button, only this one purposeful path back to life.
+  async function handleSaveReschedule(session) {
+    setRescheduleError('')
+
+    const { session_date, start_time, end_time, room } = rescheduleForm
+
+    if (!session_date) {
+      setRescheduleError('Date is required.')
+      return
+    }
+    if ((start_time && !end_time) || (!start_time && end_time)) {
+      setRescheduleError('Enter both a start and end time, or leave both blank.')
+      return
+    }
+    if (start_time && end_time && start_time >= end_time) {
+      setRescheduleError('End time must be after start time.')
+      return
+    }
+
+    setRescheduling(true)
+
+    const { data, error: rescheduleErr } = await supabase
+      .from('sessions')
+      .update({
+        session_date,
+        start_time: start_time ? `${start_time}:00` : null,
+        end_time: end_time ? `${end_time}:00` : null,
+        room: room.trim() || null,
+        status: 'not_started',
+        cancellation_reason: null,
+      })
+      .eq('id', session.id)
+      .select(
+        'id, session_number, session_date, start_time, end_time, room, status, current_phase, timing_config, mid_class_enabled, cancellation_reason',
+      )
+      .single()
+
+    setRescheduling(false)
+
+    if (rescheduleErr) {
+      setRescheduleError(rescheduleErr.message)
+      return
+    }
+
+    setSessions((prev) => prev.map((s) => (s.id === data.id ? data : s)))
+    handleCloseRescheduleForm()
+  }
+
+  // Skips the normal geolocation-gated Start Session flow entirely — this is for a class that
+  // already happened without live attendance being taken. Setting status straight to
+  // 'manual_only' unlocks Manual Override on that session's own Live page immediately, without
+  // touching any other session's row, so the next session in sequence stays fully startable.
+  async function handleMarkOffline(session) {
+    const confirmed = window.confirm(
+      `Mark Session ${session.session_number} as offline? This skips the QR/GPS flow entirely — attendance for it can only be backfilled via Manual Override afterward.`,
+    )
+    if (!confirmed) return
+
+    setMarkingOfflineSessionNumber(session.session_number)
+
+    const { data, error: markErr } = await supabase
+      .from('sessions')
+      .update({ status: 'manual_only' })
+      .eq('id', session.id)
+      .select(
+        'id, session_number, session_date, start_time, end_time, room, status, current_phase, timing_config, mid_class_enabled, cancellation_reason',
+      )
+      .single()
+
+    setMarkingOfflineSessionNumber(null)
+
+    if (markErr) {
+      setSessionsError(markErr.message)
+      return
+    }
+
+    setSessions((prev) => prev.map((s) => (s.id === data.id ? data : s)))
   }
 
   async function loadEnrolledStudents(course) {
@@ -649,7 +767,7 @@ export default function Admin() {
       .from('sessions')
       .insert(newRows)
       .select(
-        'id, session_number, session_date, status, current_phase, timing_config, mid_class_enabled, cancellation_reason',
+        'id, session_number, session_date, start_time, end_time, room, status, current_phase, timing_config, mid_class_enabled, cancellation_reason',
       )
 
     setGenerating(false)
@@ -1266,14 +1384,24 @@ export default function Admin() {
               <tbody>
                 {sessions.map((session, i) => {
                   const isCancelled = session.status === 'cancelled'
+                  const isNotStarted = session.status === 'not_started'
                   const rowBg = i % 2 === 0 ? 'bg-white' : 'bg-gray-50'
+                  const timeRange = formatTimeRange(session.start_time, session.end_time)
                   return (
                     <Fragment key={session.session_number}>
                       <tr className={`${rowBg} ${isCancelled ? 'opacity-50' : ''}`}>
                         <td className="px-6 py-3 font-medium text-gray-900">
                           {session.session_number}
                         </td>
-                        <td className="px-6 py-3 text-gray-600">{displaySessionDate(session)}</td>
+                        <td className="px-6 py-3 text-gray-600">
+                          <div>{displaySessionDate(session)}</div>
+                          {(timeRange || session.room) && (
+                            <div className="text-xs text-gray-400">
+                              {timeRange ?? 'Time TBD'}
+                              {session.room ? ` · ${session.room}` : ''}
+                            </div>
+                          )}
+                        </td>
                         <td className="px-6 py-3">
                           <span
                             className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${
@@ -1289,17 +1417,131 @@ export default function Admin() {
                           )}
                         </td>
                         <td className="px-6 py-3 text-right">
-                          {session.status === 'not_started' && (
-                            <button
-                              type="button"
-                              onClick={() => handleOpenCancelForm(session)}
-                              className="text-xs font-medium text-red-600 hover:text-red-800"
+                          {(isNotStarted || isCancelled) && (
+                            <div className="flex flex-wrap items-center justify-end gap-x-3 gap-y-1">
+                              <button
+                                type="button"
+                                onClick={() => handleOpenRescheduleForm(session)}
+                                className="text-xs font-medium text-maroon-600 hover:text-maroon-800"
+                              >
+                                Reschedule
+                              </button>
+                              {isNotStarted && (
+                                <>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleMarkOffline(session)}
+                                    disabled={markingOfflineSessionNumber === session.session_number}
+                                    className="text-xs font-medium text-amber-700 hover:text-amber-900 disabled:cursor-not-allowed disabled:opacity-60"
+                                  >
+                                    {markingOfflineSessionNumber === session.session_number
+                                      ? 'Marking…'
+                                      : 'Mark as Offline'}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleOpenCancelForm(session)}
+                                    className="text-xs font-medium text-red-600 hover:text-red-800"
+                                  >
+                                    Cancel Session
+                                  </button>
+                                </>
+                              )}
+                            </div>
+                          )}
+                          {session.status === 'manual_only' && (
+                            <Link
+                              to={`/professor/live/${session.id}`}
+                              className="text-xs font-medium text-maroon-600 hover:text-maroon-800"
                             >
-                              Cancel Session
-                            </button>
+                              Go to Live page →
+                            </Link>
                           )}
                         </td>
                       </tr>
+                      {reschedulingSessionNumber === session.session_number && rescheduleForm && (
+                        <tr className={rowBg}>
+                          <td colSpan={4} className="px-6 pb-4">
+                            <div className="rounded-lg border border-maroon-200 bg-maroon-50 p-3">
+                              <p className="text-sm font-medium text-gray-700">
+                                Reschedule Session {session.session_number}
+                              </p>
+                              <p className="mt-0.5 text-xs text-gray-500">
+                                Saving this decouples the session from its original weekly slot —
+                                it becomes a standalone override from here on.
+                              </p>
+                              <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
+                                <div>
+                                  <label className="text-xs font-medium text-gray-600">Date</label>
+                                  <input
+                                    type="date"
+                                    value={rescheduleForm.session_date}
+                                    onChange={(e) =>
+                                      setRescheduleForm({ ...rescheduleForm, session_date: e.target.value })
+                                    }
+                                    className="mt-1 w-full rounded-lg border border-gray-300 px-2.5 py-1.5 text-sm text-gray-900 outline-none transition focus:border-maroon-600 focus:ring-1 focus:ring-maroon-100"
+                                  />
+                                </div>
+                                <div>
+                                  <label className="text-xs font-medium text-gray-600">Start time</label>
+                                  <input
+                                    type="time"
+                                    value={rescheduleForm.start_time}
+                                    onChange={(e) =>
+                                      setRescheduleForm({ ...rescheduleForm, start_time: e.target.value })
+                                    }
+                                    className="mt-1 w-full rounded-lg border border-gray-300 px-2.5 py-1.5 text-sm text-gray-900 outline-none transition focus:border-maroon-600 focus:ring-1 focus:ring-maroon-100"
+                                  />
+                                </div>
+                                <div>
+                                  <label className="text-xs font-medium text-gray-600">End time</label>
+                                  <input
+                                    type="time"
+                                    value={rescheduleForm.end_time}
+                                    onChange={(e) =>
+                                      setRescheduleForm({ ...rescheduleForm, end_time: e.target.value })
+                                    }
+                                    className="mt-1 w-full rounded-lg border border-gray-300 px-2.5 py-1.5 text-sm text-gray-900 outline-none transition focus:border-maroon-600 focus:ring-1 focus:ring-maroon-100"
+                                  />
+                                </div>
+                                <div>
+                                  <label className="text-xs font-medium text-gray-600">Room</label>
+                                  <input
+                                    type="text"
+                                    value={rescheduleForm.room}
+                                    onChange={(e) => setRescheduleForm({ ...rescheduleForm, room: e.target.value })}
+                                    placeholder="e.g. CR-107"
+                                    className="mt-1 w-full rounded-lg border border-gray-300 px-2.5 py-1.5 text-sm text-gray-900 outline-none transition focus:border-maroon-600 focus:ring-1 focus:ring-maroon-100"
+                                  />
+                                </div>
+                              </div>
+                              {rescheduleError && (
+                                <p role="alert" className="mt-2 text-xs text-red-700">
+                                  {rescheduleError}
+                                </p>
+                              )}
+                              <div className="mt-3 flex gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => handleSaveReschedule(session)}
+                                  disabled={rescheduling}
+                                  className="rounded-lg bg-maroon-600 px-4 py-1.5 text-xs font-medium text-white transition hover:bg-maroon-700 disabled:cursor-not-allowed disabled:opacity-60"
+                                >
+                                  {rescheduling ? 'Saving…' : 'Save Reschedule'}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={handleCloseRescheduleForm}
+                                  disabled={rescheduling}
+                                  className="rounded-lg px-4 py-1.5 text-xs font-medium text-gray-600 transition hover:bg-gray-100"
+                                >
+                                  Nevermind
+                                </button>
+                              </div>
+                            </div>
+                          </td>
+                        </tr>
+                      )}
                       {cancellingSessionNumber === session.session_number && (
                         <tr className={rowBg}>
                           <td colSpan={4} className="px-6 pb-4">

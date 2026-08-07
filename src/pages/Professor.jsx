@@ -10,20 +10,13 @@ import {
   getTodayISTDateString,
 } from '../lib/dateFormat.js'
 import { courseSectionSuffix, courseShortCode, findCourseForSlot } from '../lib/csv.js'
+import { PROFESSOR_IDENTIFIER } from '../lib/constants.js'
 import UserMenu from '../components/UserMenu.jsx'
 
-// This prototype only has one professor login, which is deliberately given visibility into
-// every seeded course's timetable_slots — standing in for what would be separate
-// per-professor accounts in production, each seeing only their own slots via
-// professor_identifier matching their own login. Since that means this single account's
-// calendar can show other professors' classes too (BDC, SOM), each non-DTAI slot is
-// labeled with its real course/professor so that's visually obvious rather than looking
-// like a data bug. See ARCHITECTURE_NOTES.md for the fuller explanation.
-//
-// timetable_slots.professor_identifier for this login's rows is 'prof_dtai_itc' in the
-// database (distinct from the 'prof' login identifier used for verify_login) — must match
-// exactly, or every non-functional "Demo only" slot silently disappears from the calendar.
-const PROFESSOR_IDENTIFIER = 'prof_dtai_itc'
+// This professor's real, visible courses are derived strictly from timetable_slots rows
+// tagged with PROFESSOR_IDENTIFIER — not "every course that happens to exist," so a course
+// this professor doesn't teach (BDC, SOM) never appears here even if it has real sessions of
+// its own elsewhere in the app.
 const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 
 function dateStringFor(year, monthIndex, day) {
@@ -65,6 +58,44 @@ function otherCourseLabel(slot, courses) {
   return `${slot.course_name} · ${course.professor_name}`
 }
 
+// A session counts as "resolved" once it's live or past — anything that isn't still waiting
+// to be started. Cancelled sessions keep their own separate greyed-out treatment (handled
+// before this ever gets consulted), so they're deliberately not part of this set.
+const RESOLVED_STATUSES = new Set(['qr_live', 'manual_only', 'awaiting_end', 'ended'])
+
+function attendanceLabelFor(session, methodsBySession) {
+  const methods = methodsBySession.get(session.id)
+  if (!methods || methods.size === 0) return 'No attendance recorded'
+  if (methods.has('qr_scan')) return 'Taken via QR'
+  return 'Taken manually'
+}
+
+// The 4-color scheme: grey (future, not next up), red (the single next real session across
+// every course this professor teaches), a 4th color for resolved sessions showing how
+// attendance was taken, and cancelled sessions keep their own existing greyed treatment
+// (handled by the caller before reaching here).
+function sessionColorClasses(session, isNextUpcoming) {
+  if (RESOLVED_STATUSES.has(session.status)) {
+    return {
+      wrapper: 'block w-full rounded border-l-2 border-sky-500 bg-sky-50 px-1.5 py-1 text-left transition hover:bg-sky-100',
+      title: 'text-sky-800',
+      subtitle: 'text-sky-700',
+    }
+  }
+  if (isNextUpcoming) {
+    return {
+      wrapper: 'block w-full rounded border-l-2 border-red-500 bg-red-50 px-1.5 py-1 text-left transition hover:bg-red-100',
+      title: 'text-red-800',
+      subtitle: 'text-red-700',
+    }
+  }
+  return {
+    wrapper: 'block w-full rounded border-l-2 border-gray-400 bg-gray-100 px-1.5 py-1 text-left transition hover:bg-gray-200',
+    title: 'text-gray-600',
+    subtitle: 'text-gray-500',
+  }
+}
+
 export default function Professor() {
   const navigate = useNavigate()
   const todayString = getTodayISTDateString()
@@ -76,19 +107,21 @@ export default function Professor() {
   const [error, setError] = useState('')
   const [courses, setCourses] = useState([])
   const [nonFunctionalSlots, setNonFunctionalSlots] = useState([])
+  const [myCourseIds, setMyCourseIds] = useState(null) // null = not yet resolved
   const [sessionsInView, setSessionsInView] = useState([])
+  const [attendanceMethodsBySession, setAttendanceMethodsBySession] = useState(new Map())
+  const [nextUpcomingSessionId, setNextUpcomingSessionId] = useState(null)
   const [toast, setToast] = useState('')
 
-  // Courses and non-functional slots don't change per month view — fetched once.
+  // Courses and this professor's timetable_slots don't change per month view — fetched once.
   useEffect(() => {
     async function loadStatic() {
       const [coursesRes, slotsRes] = await Promise.all([
         supabase.from('courses').select('id, name, professor_name'),
         supabase
           .from('timetable_slots')
-          .select('id, day_of_week, start_time, end_time, course_name, section, room')
-          .eq('professor_identifier', PROFESSOR_IDENTIFIER)
-          .eq('is_functional', false),
+          .select('id, day_of_week, start_time, end_time, course_name, section, room, is_functional')
+          .eq('professor_identifier', PROFESSOR_IDENTIFIER),
       ])
 
       if (coursesRes.error) {
@@ -100,19 +133,62 @@ export default function Professor() {
         return
       }
 
-      setCourses(coursesRes.data ?? [])
-      setNonFunctionalSlots(slotsRes.data ?? [])
+      const allCourses = coursesRes.data ?? []
+      const allSlots = slotsRes.data ?? []
+
+      // The professor's real, visible courses are derived strictly from their own
+      // timetable_slots rows — a course that exists in the app but isn't taught by this
+      // professor (BDC, SOM) must never show up here, even if it has real sessions of its own.
+      const courseIdSet = new Set()
+      for (const slot of allSlots) {
+        const course = findCourseForSlot(allCourses, slot)
+        if (course) courseIdSet.add(course.id)
+      }
+
+      setCourses(allCourses)
+      setNonFunctionalSlots(allSlots.filter((s) => !s.is_functional))
+      setMyCourseIds(courseIdSet)
     }
 
     loadStatic()
   }, [])
 
+  // The "next upcoming" session (the single red card) is a professor-wide fact, independent of
+  // whichever month happens to be in view — fetched once myCourseIds is known, not per month.
+  useEffect(() => {
+    if (!myCourseIds || myCourseIds.size === 0) return
+
+    async function loadNextUpcoming() {
+      const { data } = await supabase
+        .from('sessions')
+        .select('id')
+        .in('course_id', [...myCourseIds])
+        .eq('status', 'not_started')
+        .gte('session_date', todayString)
+        .order('session_date', { ascending: true })
+        .order('start_time', { ascending: true, nullsFirst: false })
+        .limit(1)
+
+      setNextUpcomingSessionId(data?.[0]?.id ?? null)
+    }
+
+    loadNextUpcoming()
+  }, [myCourseIds])
+
   // Real sessions are re-fetched for whichever month is currently in view, so Back/Forward
   // navigation reaches any month, not just a fixed window from today.
   useEffect(() => {
+    if (!myCourseIds) return // wait until this professor's course scope is resolved
+
     async function loadSessions() {
       setLoading(true)
       setError('')
+
+      if (myCourseIds.size === 0) {
+        setSessionsInView([])
+        setLoading(false)
+        return
+      }
 
       const gridDates = buildMonthGridDates(viewedYear, viewedMonth)
       const gridStart = gridDates[0]
@@ -124,6 +200,7 @@ export default function Professor() {
         .neq('status', 'cancelled')
         .gte('session_date', gridStart)
         .lte('session_date', gridEnd)
+        .in('course_id', [...myCourseIds])
 
       if (sessionsError) {
         setError(sessionsError.message)
@@ -131,12 +208,33 @@ export default function Professor() {
         return
       }
 
-      setSessionsInView(data ?? [])
+      const sessions = data ?? []
+      setSessionsInView(sessions)
+
+      // Only resolved (live-or-past) sessions need an attendance-method label.
+      const resolvedIds = sessions.filter((s) => RESOLVED_STATUSES.has(s.status)).map((s) => s.id)
+      if (resolvedIds.length > 0) {
+        const { data: arData } = await supabase
+          .from('attendance_records')
+          .select('session_id, method')
+          .in('session_id', resolvedIds)
+
+        const methodMap = new Map()
+        for (const row of arData ?? []) {
+          const set = methodMap.get(row.session_id) ?? new Set()
+          set.add(row.method)
+          methodMap.set(row.session_id, set)
+        }
+        setAttendanceMethodsBySession(methodMap)
+      } else {
+        setAttendanceMethodsBySession(new Map())
+      }
+
       setLoading(false)
     }
 
     loadSessions()
-  }, [viewedYear, viewedMonth])
+  }, [viewedYear, viewedMonth, myCourseIds])
 
   useEffect(() => {
     if (!toast) return
@@ -236,6 +334,13 @@ export default function Professor() {
           Real scheduled sessions by date — including anything rescheduled off its usual weekly
           slot. For the recurring weekly pattern itself, see Admin's Weekly Timetable.
         </p>
+
+        <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1.5 border-t border-gray-100 pt-3 text-xs text-gray-500">
+          <LegendSwatch className="bg-gray-100 border-gray-400" label="Upcoming" />
+          <LegendSwatch className="bg-red-50 border-red-500" label="Next up" />
+          <LegendSwatch className="bg-sky-50 border-sky-500" label="Resolved (QR / manual)" />
+          <LegendSwatch className="bg-gray-100 border-gray-300 opacity-60" label="Cancelled" />
+        </div>
       </Card>
 
       <div className="mt-6 overflow-hidden rounded-xl bg-white shadow-sm">
@@ -280,24 +385,37 @@ export default function Professor() {
                   </p>
 
                   <div className="mt-1 space-y-1">
-                    {realSessions.map((session) => (
-                      <button
-                        key={session.id}
-                        type="button"
-                        onClick={() => navigate(`/professor/live/${session.id}`)}
-                        className="block w-full rounded border-l-2 border-maroon-500 bg-maroon-50 px-1.5 py-1 text-left transition hover:bg-maroon-100"
-                      >
-                        <p className="truncate text-[11px] font-semibold text-maroon-800">
-                          {courseShortCode(session.courses?.name ?? '')}
-                          {courseSectionSuffix(session.courses?.name ?? '') ? ` ${courseSectionSuffix(session.courses?.name ?? '')}` : ''}
-                          {' '}· S{session.session_number}
-                        </p>
-                        <p className="truncate text-[10px] text-maroon-700">
-                          {formatTimeRange(session.start_time, session.end_time) ?? 'Time TBD'}
-                          {session.room ? ` · ${session.room}` : ''}
-                        </p>
-                      </button>
-                    ))}
+                    {realSessions.map((session) => {
+                      const isNextUpcoming = session.id === nextUpcomingSessionId
+                      const colors = sessionColorClasses(session, isNextUpcoming)
+                      const isResolved = RESOLVED_STATUSES.has(session.status)
+                      const sectionSuffix = courseSectionSuffix(session.courses?.name ?? '')
+                      return (
+                        <button
+                          key={session.id}
+                          type="button"
+                          onClick={() => navigate(`/professor/live/${session.id}`)}
+                          className={colors.wrapper}
+                        >
+                          <p className={`truncate text-[11px] font-semibold ${colors.title}`}>
+                            {courseShortCode(session.courses?.name ?? '')}
+                            {sectionSuffix ? ` ${sectionSuffix}` : ''}
+                            {' '}· S{session.session_number}
+                          </p>
+                          <p className={`truncate text-[10px] ${colors.subtitle}`}>
+                            {formatTimeRange(session.start_time, session.end_time) ?? 'Time TBD'}
+                            {session.room ? ` · ${session.room}` : ''}
+                          </p>
+                          <p className={`truncate text-[9px] font-medium ${colors.subtitle}`}>
+                            {isResolved
+                              ? attendanceLabelFor(session, attendanceMethodsBySession)
+                              : isNextUpcoming
+                                ? 'Next up'
+                                : 'Upcoming'}
+                          </p>
+                        </button>
+                      )
+                    })}
 
                     {demoOccurrences.map((slot) => (
                       <button
@@ -332,6 +450,15 @@ export default function Professor() {
         </div>
       )}
     </PageShell>
+  )
+}
+
+function LegendSwatch({ className, label }) {
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      <span className={`h-2.5 w-2.5 rounded-sm border-l-2 ${className}`} />
+      {label}
+    </span>
   )
 }
 

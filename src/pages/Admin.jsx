@@ -25,6 +25,7 @@ import {
   nextOccurrenceOfDay,
 } from '../lib/dateFormat.js'
 import { courseSectionSuffix, courseShortCode, downloadCsv, rowsToCsv } from '../lib/csv.js'
+import { PROFESSOR_IDENTIFIER } from '../lib/constants.js'
 import UserMenu from '../components/UserMenu.jsx'
 
 const DISTRIBUTION_BAND_COLORS = {
@@ -635,7 +636,7 @@ export default function Admin() {
       section: section.trim(),
       room: room.trim(),
       is_functional,
-      professor_identifier: 'prof',
+      professor_identifier: PROFESSOR_IDENTIFIER,
     }
 
     const { error: saveError } = editingSlotId

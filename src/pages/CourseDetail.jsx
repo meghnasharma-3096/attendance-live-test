@@ -7,8 +7,9 @@ import UserMenu from '../components/UserMenu.jsx'
 import QrScanner from '../components/QrScanner.jsx'
 
 function displaySessionDate(session) {
-  const dateString = session.status === 'not_started' ? getTodayISTDateString() : session.session_date
-  return formatDateIST(dateString)
+  const todayString = getTodayISTDateString()
+  const isStale = session.status === 'not_started' && session.session_date < todayString
+  return formatDateIST(isStale ? todayString : session.session_date)
 }
 
 function parseScanUrl(decodedText) {

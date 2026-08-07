@@ -104,6 +104,21 @@ function getNowISTTimeString() {
   return new Date().toLocaleTimeString('en-GB', { timeZone: 'Asia/Kolkata', hour12: false })
 }
 
+// TEMPORARY — remove before final deploy. Testing-only simulated "now" for the calendar's own
+// color/clickability logic ONLY (the two functions just below it) — never used anywhere that
+// writes real data (the reschedule form, the stale-session watchdog, attendance timestamps all
+// live outside this file and use the real clock untouched).
+const TESTING_SIMULATED_NOW = new Date('2026-08-08T08:47:00+05:30')
+
+// TEMPORARY — remove along with TESTING_SIMULATED_NOW above; restore the two call sites below
+// to getTodayISTDateString() / getNowISTTimeString() directly.
+function calendarTodayISTDateString() {
+  return TESTING_SIMULATED_NOW.toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' })
+}
+function calendarNowISTTimeString() {
+  return TESTING_SIMULATED_NOW.toLocaleTimeString('en-GB', { timeZone: 'Asia/Kolkata', hour12: false })
+}
+
 // Five real-world states, purely by date/time — not by status:
 //   grey       — a future date (not today)
 //   light      — today, before start_time
@@ -191,14 +206,20 @@ function hashString(str) {
   return Math.abs(hash)
 }
 
-function demoAttendanceLabel(date, section) {
-  return hashString(`${date}::${section}`) % 2 === 0 ? 'Taken via QR' : 'Taken manually'
+// Drives both the label AND the color together (as synthetic method counts) so a card never
+// shows one label with a mismatched color — e.g. "Taken via QR" text with the manual-color tint.
+function demoAttendanceCounts(date, section) {
+  const isQR = hashString(`${date}::${section}`) % 2 === 0
+  return isQR ? { qr_scan: 1, manual_entry: 0 } : { qr_scan: 0, manual_entry: 1 }
 }
 
 export default function Professor() {
   const navigate = useNavigate()
-  const [todayString, setTodayString] = useState(getTodayISTDateString())
-  const [nowTimeString, setNowTimeString] = useState(getNowISTTimeString())
+  // TEMPORARY: calendarTodayISTDateString()/calendarNowISTTimeString() below use
+  // TESTING_SIMULATED_NOW — restore to getTodayISTDateString()/getNowISTTimeString() when
+  // removing the override.
+  const [todayString, setTodayString] = useState(calendarTodayISTDateString())
+  const [nowTimeString, setNowTimeString] = useState(calendarNowISTTimeString())
   const todayDate = new Date(`${todayString}T00:00:00Z`)
 
   const [viewedYear, setViewedYear] = useState(todayDate.getUTCFullYear())
@@ -215,9 +236,11 @@ export default function Professor() {
   // Refreshed periodically so "ongoing right now" genuinely activates/deactivates live, not
   // just once at page load.
   useEffect(() => {
+    // TEMPORARY: restore to getTodayISTDateString()/getNowISTTimeString() when removing
+    // TESTING_SIMULATED_NOW.
     const interval = setInterval(() => {
-      setTodayString(getTodayISTDateString())
-      setNowTimeString(getNowISTTimeString())
+      setTodayString(calendarTodayISTDateString())
+      setNowTimeString(calendarNowISTTimeString())
     }, 30000)
     return () => clearInterval(interval)
   }, [])
@@ -508,13 +531,16 @@ export default function Professor() {
                           todayString,
                           nowTimeString,
                         )
-                        const colors = sessionColorClasses(demoTimeState, undefined)
                         // A past-dated ITC card gets a stable, deterministic QR/manual label
                         // (never real attendance — ITC has none) instead of "No attendance
-                        // recorded"; upcoming ones keep the plain state label unaffected.
+                        // recorded" — and the same synthetic counts drive the color too, so the
+                        // card's tint always matches what its own label says. Upcoming ones keep
+                        // the plain state label/color unaffected.
                         const isPastDemo = date < todayString
+                        const demoCounts = isPastDemo ? demoAttendanceCounts(date, slot.section) : undefined
+                        const colors = sessionColorClasses(demoTimeState, demoCounts)
                         const demoLabel = isPastDemo
-                          ? demoAttendanceLabel(date, slot.section)
+                          ? sessionStateLabel(demoTimeState, demoCounts)
                           : sessionStateLabel(demoTimeState, undefined)
                         return (
                           <button
@@ -543,14 +569,34 @@ export default function Professor() {
                       const session = entry.session
                       const timeState = sessionTimeState(session, todayString, nowTimeString)
                       const counts = methodCountsBySession.get(session.id)
-                      const colors = sessionColorClasses(timeState, counts)
                       const sectionSuffix = courseSectionSuffix(session.courses?.name ?? '')
+
+                      // Permanent rule: a not_started session is only ever clickable on its own
+                      // real session_date. Any other not_started session — however it ended up
+                      // with a mismatched date, past or future — is visually locked with the
+                      // same muted, non-navigating treatment ITC's placeholder cards use.
+                      // Already-active/ended sessions (qr_live, manual_only, ended, etc.) are
+                      // untouched by this — starting isn't in question for those anymore.
+                      const isLocked = session.status === 'not_started' && session.session_date !== todayString
+                      const colors = isLocked
+                        ? {
+                            wrapper: 'block w-full rounded bg-gray-100 px-1.5 py-1 text-left',
+                            title: 'text-gray-500',
+                            subtitle: 'text-gray-400',
+                          }
+                        : sessionColorClasses(timeState, counts)
 
                       return (
                         <button
                           key={session.id}
                           type="button"
-                          onClick={() => navigate(`/professor/live/${session.id}`)}
+                          onClick={() => {
+                            if (isLocked) {
+                              setToast("This session isn't today — check back on its scheduled date")
+                              return
+                            }
+                            navigate(`/professor/live/${session.id}`)
+                          }}
                           className={colors.wrapper}
                         >
                           <p className={`truncate text-[11px] font-semibold ${colors.title}`}>
@@ -563,7 +609,7 @@ export default function Professor() {
                             {session.room ? ` · ${session.room}` : ''}
                           </p>
                           <p className={`truncate text-[9px] font-medium ${colors.subtitle}`}>
-                            {sessionStateLabel(timeState, counts)}
+                            {isLocked ? 'Not today' : sessionStateLabel(timeState, counts)}
                           </p>
                         </button>
                       )

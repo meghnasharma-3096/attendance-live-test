@@ -27,6 +27,7 @@ import {
 import { courseSectionSuffix, courseShortCode, downloadCsv, rowsToCsv } from '../lib/csv.js'
 import UserMenu from '../components/UserMenu.jsx'
 import AnomalyReport from '../components/AnomalyReport.jsx'
+import CsvBackfillUpload from '../components/CsvBackfillUpload.jsx'
 
 // Sentinel selectedCourseId value for the "All courses" toggle — deliberately not a real
 // course id, so `courses.find(c => c.id === selectedCourseId)` naturally resolves to null and
@@ -142,6 +143,8 @@ export default function Admin() {
   const [durationInput, setDurationInput] = useState('')
   const [savingDuration, setSavingDuration] = useState(false)
   const [saveMessage, setSaveMessage] = useState(null)
+  const [graceBeforeInput, setGraceBeforeInput] = useState('0')
+  const [graceAfterInput, setGraceAfterInput] = useState('0')
 
   const [exportingCourse, setExportingCourse] = useState(false)
   const [exportError, setExportError] = useState('')
@@ -167,6 +170,7 @@ export default function Admin() {
   const [rescheduleError, setRescheduleError] = useState('')
 
   const [markingOfflineSessionNumber, setMarkingOfflineSessionNumber] = useState(null)
+  const [uploadingCsvSessionNumber, setUploadingCsvSessionNumber] = useState(null)
 
   const [analyticsLoading, setAnalyticsLoading] = useState(true)
   const [analyticsError, setAnalyticsError] = useState('')
@@ -187,7 +191,9 @@ export default function Admin() {
       const [coursesRes, allStudentsRes] = await Promise.all([
         supabase
           .from('courses')
-          .select('id, name, professor_name, total_sessions, default_qr_duration_seconds')
+          .select(
+            'id, name, professor_name, total_sessions, default_qr_duration_seconds, grace_period_before_minutes, grace_period_after_minutes',
+          )
           .order('created_at'),
         supabase.from('students').select('pgp_id, name').order('name'),
       ])
@@ -216,6 +222,8 @@ export default function Admin() {
     if (!selectedCourse) return
 
     setDurationInput(String(selectedCourse.default_qr_duration_seconds))
+    setGraceBeforeInput(String(selectedCourse.grace_period_before_minutes ?? 0))
+    setGraceAfterInput(String(selectedCourse.grace_period_after_minutes ?? 0))
     setSaveMessage(null)
     setGenerateMessage(null)
     setTimetableMessage(null)
@@ -841,10 +849,13 @@ export default function Admin() {
     setSavingDuration(true)
     setSaveMessage(null)
 
-    const { error: updateError } = await supabase
-      .from('courses')
-      .update({ default_qr_duration_seconds: Number(durationInput) })
-      .eq('id', selectedCourse.id)
+    const updates = {
+      default_qr_duration_seconds: Number(durationInput),
+      grace_period_before_minutes: Number(graceBeforeInput) || 0,
+      grace_period_after_minutes: Number(graceAfterInput) || 0,
+    }
+
+    const { error: updateError } = await supabase.from('courses').update(updates).eq('id', selectedCourse.id)
 
     setSavingDuration(false)
 
@@ -853,13 +864,7 @@ export default function Admin() {
       return
     }
 
-    setCourses((prev) =>
-      prev.map((c) =>
-        c.id === selectedCourse.id
-          ? { ...c, default_qr_duration_seconds: Number(durationInput) }
-          : c,
-      ),
-    )
+    setCourses((prev) => prev.map((c) => (c.id === selectedCourse.id ? { ...c, ...updates } : c)))
     setSaveMessage({ type: 'success', text: 'Saved.' })
   }
 
@@ -1065,26 +1070,56 @@ export default function Admin() {
           Professors can override this per session.
         </p>
 
-        <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center">
-          <div className="flex items-center gap-2">
+        <div className="mt-4 flex items-center gap-2">
+          <input
+            type="number"
+            min="1"
+            value={durationInput}
+            onChange={(e) => setDurationInput(e.target.value)}
+            className="w-28 rounded-lg border border-gray-300 px-3.5 py-2.5 text-gray-900 outline-none transition focus:border-maroon-600 focus:ring-2 focus:ring-maroon-100"
+          />
+          <span className="text-sm text-gray-500">seconds</span>
+        </div>
+
+        <p className="mt-5 text-sm text-gray-500">
+          Default grace period for <strong>{selectedCourse.name}</strong> — used whenever a
+          professor teaching it hasn't set their own personal grace period.
+        </p>
+        <div className="mt-3 grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <div>
+            <label className="text-sm font-medium text-gray-700">
+              Start grace period (minutes before class)
+            </label>
             <input
               type="number"
-              min="1"
-              value={durationInput}
-              onChange={(e) => setDurationInput(e.target.value)}
-              className="w-28 rounded-lg border border-gray-300 px-3.5 py-2.5 text-gray-900 outline-none transition focus:border-maroon-600 focus:ring-2 focus:ring-maroon-100"
+              min="0"
+              value={graceBeforeInput}
+              onChange={(e) => setGraceBeforeInput(e.target.value)}
+              className="mt-1 w-full rounded-lg border border-gray-300 px-3.5 py-2.5 text-gray-900 outline-none transition focus:border-maroon-600 focus:ring-2 focus:ring-maroon-100"
             />
-            <span className="text-sm text-gray-500">seconds</span>
           </div>
-          <button
-            type="button"
-            onClick={handleSaveDuration}
-            disabled={savingDuration}
-            className="rounded-lg bg-maroon-600 px-6 py-2.5 font-medium text-white transition hover:bg-maroon-700 disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            {savingDuration ? 'Saving…' : 'Save'}
-          </button>
+          <div>
+            <label className="text-sm font-medium text-gray-700">
+              End grace period (minutes after class)
+            </label>
+            <input
+              type="number"
+              min="0"
+              value={graceAfterInput}
+              onChange={(e) => setGraceAfterInput(e.target.value)}
+              className="mt-1 w-full rounded-lg border border-gray-300 px-3.5 py-2.5 text-gray-900 outline-none transition focus:border-maroon-600 focus:ring-2 focus:ring-maroon-100"
+            />
+          </div>
         </div>
+
+        <button
+          type="button"
+          onClick={handleSaveDuration}
+          disabled={savingDuration}
+          className="mt-4 rounded-lg bg-maroon-600 px-6 py-2.5 font-medium text-white transition hover:bg-maroon-700 disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          {savingDuration ? 'Saving…' : 'Save'}
+        </button>
 
         {saveMessage && (
           <p
@@ -1457,8 +1492,30 @@ export default function Admin() {
                               Go to Live page →
                             </Link>
                           )}
+                          <div className="mt-1">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setUploadingCsvSessionNumber((prev) =>
+                                  prev === session.session_number ? null : session.session_number,
+                                )
+                              }
+                              className="text-xs font-medium text-gray-500 hover:text-gray-700"
+                            >
+                              {uploadingCsvSessionNumber === session.session_number
+                                ? 'Close CSV Upload'
+                                : 'Upload CSV'}
+                            </button>
+                          </div>
                         </td>
                       </tr>
+                      {uploadingCsvSessionNumber === session.session_number && (
+                        <tr className={rowBg}>
+                          <td colSpan={4} className="px-6 pb-4">
+                            <CsvBackfillUpload sessionId={session.id} courseId={selectedCourse.id} />
+                          </td>
+                        </tr>
+                      )}
                       {reschedulingSessionNumber === session.session_number && rescheduleForm && (
                         <tr className={rowBg}>
                           <td colSpan={4} className="px-6 pb-4">

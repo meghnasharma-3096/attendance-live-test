@@ -10,6 +10,70 @@ export function rowsToCsv(rows) {
   return rows.map((row) => row.map(toCsvValue).join(',')).join('\r\n')
 }
 
+// Inverts rowsToCsv/toCsvValue above — handles quoted fields containing commas, quotes
+// (escaped as ""), and embedded newlines, so a file downloaded from this app's own export
+// and re-uploaded unmodified round-trips exactly.
+export function parseCsv(text) {
+  const rows = []
+  let row = []
+  let field = ''
+  let inQuotes = false
+  let i = 0
+
+  while (i < text.length) {
+    const char = text[i]
+
+    if (inQuotes) {
+      if (char === '"') {
+        if (text[i + 1] === '"') {
+          field += '"'
+          i += 2
+          continue
+        }
+        inQuotes = false
+        i += 1
+        continue
+      }
+      field += char
+      i += 1
+      continue
+    }
+
+    if (char === '"') {
+      inQuotes = true
+      i += 1
+      continue
+    }
+    if (char === ',') {
+      row.push(field)
+      field = ''
+      i += 1
+      continue
+    }
+    if (char === '\r') {
+      i += 1
+      continue
+    }
+    if (char === '\n') {
+      row.push(field)
+      rows.push(row)
+      row = []
+      field = ''
+      i += 1
+      continue
+    }
+    field += char
+    i += 1
+  }
+
+  if (field !== '' || row.length > 0) {
+    row.push(field)
+    rows.push(row)
+  }
+
+  return rows.filter((r) => !(r.length === 1 && r[0] === ''))
+}
+
 export function downloadCsv(filename, csvString) {
   const blob = new Blob([csvString], { type: 'text/csv;charset=utf-8;' })
   const url = URL.createObjectURL(blob)

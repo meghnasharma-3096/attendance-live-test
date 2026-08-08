@@ -16,6 +16,7 @@ import {
   encodeSectionScope,
   encodeSubjectScope,
 } from '../lib/anomalyScope.js'
+import { effectiveGraceMinutes, resolveTodayPastState, sessionTimeState } from '../lib/sessionGrace.js'
 import UserMenu from '../components/UserMenu.jsx'
 
 // This professor's real, visible courses are derived strictly from timetable_slots rows
@@ -109,33 +110,18 @@ function getNowISTTimeString() {
   return new Date().toLocaleTimeString('en-GB', { timeZone: 'Asia/Kolkata', hour12: false })
 }
 
-// Five real-world states, purely by date/time — not by status:
-//   grey       — a future date (not today)
-//   light      — today, before start_time
-//   dark       — today, between start_time and end_time (genuinely happening right now)
-//   Color A    — already past, attendance predominantly qr_scan
-//   Color B    — already past, attendance predominantly manual_entry (or no records at all)
-function sessionTimeState(session, todayString, nowTimeString) {
-  const { session_date, start_time, end_time } = session
-
-  if (session_date > todayString) return 'future'
-
-  if (session_date === todayString) {
-    if (start_time && end_time && nowTimeString >= start_time && nowTimeString <= end_time) {
-      return 'ongoing'
-    }
-    if (start_time && nowTimeString < start_time) {
-      return 'today-pending'
-    }
-    if (!end_time || nowTimeString > end_time) {
-      return 'past'
-    }
-    return 'today-pending'
-  }
-
-  return 'past'
-}
-
+// Eight real-world states, purely by date/time (+ grace window + attendance presence) — not
+// by session.status. sessionTimeState (shared, in lib/sessionGrace.js) resolves the pure
+// time-of-day slices; resolveTodayPastState forks its 'today-past' result into 'past' vs
+// 'attendance-missed' depending on whether real attendance exists:
+//   grey        — a future date (not today)
+//   light amber — today, not yet in the pre-class grace window
+//   cyan        — today, within the pre-class grace window ("beginning soon")
+//   dark amber  — today, between start_time and end_time (genuinely happening right now)
+//   indigo      — today, past end_time but within the post-class grace window
+//   red         — today, grace fully expired, zero real attendance ("attendance missed")
+//   Color A     — past (today-with-attendance, or any earlier date), predominantly qr_scan
+//   Color B     — past (today-with-attendance, or any earlier date), predominantly manual/none
 function sessionColorClasses(timeState, methodCounts) {
   if (timeState === 'past') {
     const counts = methodCounts ?? { qr_scan: 0, manual_entry: 0 }
@@ -152,11 +138,32 @@ function sessionColorClasses(timeState, methodCounts) {
           subtitle: 'text-violet-700',
         }
   }
+  if (timeState === 'attendance-missed') {
+    return {
+      wrapper: 'block w-full rounded border-l-2 border-red-500 bg-red-50 px-1.5 py-1 text-left transition hover:bg-red-100',
+      title: 'text-red-800',
+      subtitle: 'text-red-700',
+    }
+  }
+  if (timeState === 'grace-period') {
+    return {
+      wrapper: 'block w-full rounded border-l-2 border-indigo-800 bg-indigo-600 px-1.5 py-1 text-left transition hover:bg-indigo-700',
+      title: 'text-white',
+      subtitle: 'text-indigo-50',
+    }
+  }
   if (timeState === 'ongoing') {
     return {
       wrapper: 'block w-full rounded border-l-2 border-amber-800 bg-amber-600 px-1.5 py-1 text-left transition hover:bg-amber-700',
       title: 'text-white',
       subtitle: 'text-amber-50',
+    }
+  }
+  if (timeState === 'beginning-soon') {
+    return {
+      wrapper: 'block w-full rounded border-l-2 border-cyan-500 bg-cyan-50 px-1.5 py-1 text-left transition hover:bg-cyan-100',
+      title: 'text-cyan-800',
+      subtitle: 'text-cyan-700',
     }
   }
   if (timeState === 'today-pending') {
@@ -179,7 +186,10 @@ function sessionStateLabel(timeState, methodCounts) {
     if (counts.qr_scan === 0 && counts.manual_entry === 0) return 'No attendance recorded'
     return counts.qr_scan >= counts.manual_entry ? 'Taken via QR' : 'Taken manually'
   }
+  if (timeState === 'attendance-missed') return 'Attendance Missed'
+  if (timeState === 'grace-period') return 'Currently Ongoing — Grace Period'
   if (timeState === 'ongoing') return 'Happening now'
+  if (timeState === 'beginning-soon') return 'Beginning soon'
   if (timeState === 'today-pending') return 'Later today'
   return 'Upcoming'
 }
@@ -222,6 +232,14 @@ export default function Professor() {
   const [methodCountsBySession, setMethodCountsBySession] = useState(new Map())
   const [toast, setToast] = useState('')
   const [anomalyScope, setAnomalyScope] = useState('all')
+  const [professorGrace, setProfessorGrace] = useState({
+    grace_period_before_minutes: 0,
+    grace_period_after_minutes: 0,
+  })
+  const [graceBeforeInput, setGraceBeforeInput] = useState('0')
+  const [graceAfterInput, setGraceAfterInput] = useState('0')
+  const [savingGrace, setSavingGrace] = useState(false)
+  const [graceSaveMessage, setGraceSaveMessage] = useState(null)
 
   // Refreshed periodically so "ongoing right now" genuinely activates/deactivates live, not
   // just once at page load.
@@ -233,13 +251,54 @@ export default function Professor() {
     return () => clearInterval(interval)
   }, [])
 
+  // This professor's own global grace-period setting — applies to every course/section they
+  // teach, with no per-session override. Fetched via RPC since the users table itself blocks
+  // anon SELECT entirely (unlike every other table this app reads directly).
+  useEffect(() => {
+    async function loadGrace() {
+      const { data } = await supabase.rpc('get_professor_grace_period', { p_user_id: user.user_id })
+      if (data?.[0]) {
+        setProfessorGrace(data[0])
+        setGraceBeforeInput(String(data[0].grace_period_before_minutes))
+        setGraceAfterInput(String(data[0].grace_period_after_minutes))
+      }
+    }
+    loadGrace()
+  }, [user.user_id])
+
+  async function handleSaveGracePeriod() {
+    setSavingGrace(true)
+    setGraceSaveMessage(null)
+
+    const before = Number(graceBeforeInput) || 0
+    const after = Number(graceAfterInput) || 0
+
+    const { error: rpcError } = await supabase.rpc('update_professor_grace_period', {
+      p_user_id: user.user_id,
+      p_before: before,
+      p_after: after,
+    })
+
+    setSavingGrace(false)
+
+    if (rpcError) {
+      setGraceSaveMessage({ type: 'error', text: rpcError.message })
+      return
+    }
+
+    setProfessorGrace({ grace_period_before_minutes: before, grace_period_after_minutes: after })
+    setGraceSaveMessage({ type: 'success', text: 'Saved.' })
+  }
+
   // Courses and this professor's timetable_slots don't change per month view — fetched once.
   // Only functional slots contribute to myCourseIds: a course whose slots are all
   // non-functional (ITC) is display-layer only and should never be treated as "real."
   useEffect(() => {
     async function loadStatic() {
       const [coursesRes, slotsRes] = await Promise.all([
-        supabase.from('courses').select('id, name, professor_name'),
+        supabase
+          .from('courses')
+          .select('id, name, professor_name, grace_period_before_minutes, grace_period_after_minutes'),
         supabase
           .from('timetable_slots')
           .select('id, day_of_week, start_time, end_time, course_name, section, room, is_functional')
@@ -302,7 +361,9 @@ export default function Professor() {
 
       const { data, error: sessionsError } = await supabase
         .from('sessions')
-        .select('id, session_number, session_date, status, start_time, end_time, room, course_id, courses(name)')
+        .select(
+          'id, session_number, session_date, status, start_time, end_time, room, course_id, courses(name, grace_period_before_minutes, grace_period_after_minutes)',
+        )
         .gte('session_date', gridStart)
         .lte('session_date', gridEnd)
         .in('course_id', [...myCourseIds])
@@ -316,10 +377,11 @@ export default function Professor() {
       const sessions = data ?? []
       setSessionsInView(sessions)
 
-      // Only past sessions need an attendance-method breakdown — future/today sessions can't
-      // have any yet.
+      // Sessions today-or-earlier need an attendance-method breakdown — today's matters too
+      // now, to tell "attendance missed" (zero records) apart from a properly-run session
+      // whose grace window has simply closed. Future sessions can't have any yet.
       const pastIds = sessions
-        .filter((s) => sessionTimeState(s, todayString, nowTimeString) === 'past')
+        .filter((s) => s.session_date <= todayString)
         .map((s) => s.id)
 
       if (pastIds.length > 0) {
@@ -457,7 +519,10 @@ export default function Professor() {
         <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1.5 border-t border-gray-100 pt-3 text-xs text-gray-500">
           <LegendSwatch className="bg-gray-100 border-gray-400" label="Future" />
           <LegendSwatch className="bg-amber-50 border-amber-400" label="Today · not started" />
+          <LegendSwatch className="bg-cyan-50 border-cyan-500" label="Beginning soon" />
           <LegendSwatch className="bg-amber-600 border-amber-800" label="Today · ongoing" />
+          <LegendSwatch className="bg-indigo-600 border-indigo-800" label="Ongoing · grace period" />
+          <LegendSwatch className="bg-red-50 border-red-500" label="Attendance missed" />
           <LegendSwatch className="bg-sky-50 border-sky-500" label="Ended · mostly QR" />
           <LegendSwatch className="bg-violet-50 border-violet-500" label="Ended · mostly manual" />
         </div>
@@ -499,6 +564,58 @@ export default function Professor() {
             Run Anomaly Check
           </button>
         </div>
+      </div>
+
+      <div className="mt-6 rounded-xl bg-white p-6 shadow-sm sm:p-8">
+        <h2 className="text-base font-semibold text-gray-900">Attendance Settings</h2>
+        <p className="mt-1 text-sm text-gray-500">
+          Applies to every course and section you teach — there's no per-session override. Wins
+          over a course's own admin-set default whenever you set a non-zero value here.
+        </p>
+        <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <div>
+            <label className="text-sm font-medium text-gray-700">
+              Start grace period (minutes before class)
+            </label>
+            <input
+              type="number"
+              min="0"
+              value={graceBeforeInput}
+              onChange={(e) => setGraceBeforeInput(e.target.value)}
+              className="mt-1 w-full rounded-lg border border-gray-300 px-3.5 py-2.5 text-gray-900 outline-none transition focus:border-maroon-600 focus:ring-2 focus:ring-maroon-100"
+            />
+          </div>
+          <div>
+            <label className="text-sm font-medium text-gray-700">
+              End grace period (minutes after class)
+            </label>
+            <input
+              type="number"
+              min="0"
+              value={graceAfterInput}
+              onChange={(e) => setGraceAfterInput(e.target.value)}
+              className="mt-1 w-full rounded-lg border border-gray-300 px-3.5 py-2.5 text-gray-900 outline-none transition focus:border-maroon-600 focus:ring-2 focus:ring-maroon-100"
+            />
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={handleSaveGracePeriod}
+          disabled={savingGrace}
+          className="mt-4 rounded-lg bg-maroon-600 px-6 py-2.5 text-sm font-medium text-white transition hover:bg-maroon-700 disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          {savingGrace ? 'Saving…' : 'Save'}
+        </button>
+        {graceSaveMessage && (
+          <p
+            role="alert"
+            className={`mt-3 rounded-lg px-3.5 py-2.5 text-sm ${
+              graceSaveMessage.type === 'error' ? 'bg-red-50 text-red-700' : 'bg-green-50 text-green-700'
+            }`}
+          >
+            {graceSaveMessage.text}
+          </p>
+        )}
       </div>
 
       <div className="mt-6 overflow-hidden rounded-xl bg-white shadow-sm">
@@ -555,10 +672,16 @@ export default function Professor() {
                         // Same date-based coloring as a real session — built from this specific
                         // occurrence's date and the slot's fixed time, since a demo entry has no
                         // status of its own to key off.
-                        const demoTimeState = sessionTimeState(
-                          { session_date: date, start_time: slot.start_time, end_time: slot.end_time },
-                          todayString,
-                          nowTimeString,
+                        // ITC has no real attendance concept, so its "window closed" case
+                        // always resolves to the old past/QR-or-manual treatment — never the
+                        // new 'attendance-missed' state, which only applies to real sessions.
+                        const demoTimeState = resolveTodayPastState(
+                          sessionTimeState(
+                            { session_date: date, start_time: slot.start_time, end_time: slot.end_time },
+                            todayString,
+                            nowTimeString,
+                          ),
+                          true,
                         )
                         // A past-dated ITC card gets a stable, deterministic QR/manual label
                         // (never real attendance — ITC has none) instead of "No attendance
@@ -596,8 +719,17 @@ export default function Professor() {
                       }
 
                       const session = entry.session
-                      const timeState = sessionTimeState(session, todayString, nowTimeString)
+                      const grace = effectiveGraceMinutes(professorGrace, session.courses)
+                      const rawTimeState = sessionTimeState(
+                        session,
+                        todayString,
+                        nowTimeString,
+                        grace.before,
+                        grace.after,
+                      )
                       const counts = methodCountsBySession.get(session.id)
+                      const hasAttendance = !!counts && (counts.qr_scan > 0 || counts.manual_entry > 0)
+                      const timeState = resolveTodayPastState(rawTimeState, hasAttendance)
                       const sectionSuffix = courseSectionSuffix(session.courses?.name ?? '')
 
                       // Permanent rule: a not_started session is only ever clickable on its own
@@ -606,6 +738,9 @@ export default function Professor() {
                       // same muted, non-navigating treatment ITC's placeholder cards use.
                       // Already-active/ended sessions (qr_live, manual_only, ended, etc.) are
                       // untouched by this — starting isn't in question for those anymore.
+                      // Clickability itself never depends on the new time-aware states above —
+                      // beginning-soon/grace-period/attendance-missed all stay fully clickable,
+                      // same as every other unlocked state.
                       const isLocked = session.status === 'not_started' && session.session_date !== todayString
                       const colors = isLocked
                         ? {

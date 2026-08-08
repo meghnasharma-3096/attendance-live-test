@@ -2,10 +2,13 @@ import { useEffect, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { ArrowLeft } from 'lucide-react'
 import { QRCodeSVG } from 'qrcode.react'
+import { useAuth } from '../context/AuthContext.jsx'
 import { supabase } from '../lib/supabaseClient.js'
 import { formatDateIST, formatDateTimeIST, getTodayISTDateString } from '../lib/dateFormat.js'
 import { courseShortCode, downloadCsv, rowsToCsv } from '../lib/csv.js'
+import { effectiveGraceMinutes, resolveTodayPastState, sessionTimeState } from '../lib/sessionGrace.js'
 import UserMenu from '../components/UserMenu.jsx'
+import CsvBackfillUpload from '../components/CsvBackfillUpload.jsx'
 
 const TIMING_OPTIONS = [
   { value: 'start', label: 'Start of class' },
@@ -50,6 +53,10 @@ function displaySessionDate(session) {
   return formatDateIST(isStale ? todayString : session.session_date)
 }
 
+function getNowISTTimeString() {
+  return new Date().toLocaleTimeString('en-GB', { timeZone: 'Asia/Kolkata', hour12: false })
+}
+
 function getCurrentPosition() {
   return new Promise((resolve, reject) => {
     if (!navigator.geolocation) {
@@ -65,10 +72,18 @@ function getCurrentPosition() {
 
 export default function ProfessorLive() {
   const { sessionId } = useParams()
+  const { user } = useAuth()
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [session, setSession] = useState(null)
   const [course, setCourse] = useState(null)
+  const [hasAnyAttendance, setHasAnyAttendance] = useState(false)
+  const [todayString, setTodayString] = useState(getTodayISTDateString())
+  const [nowTimeString, setNowTimeString] = useState(getNowISTTimeString())
+  const [professorGrace, setProfessorGrace] = useState({
+    grace_period_before_minutes: 0,
+    grace_period_after_minutes: 0,
+  })
   const [starting, setStarting] = useState(false)
   const [startError, setStartError] = useState('')
   const [ending, setEnding] = useState(false)
@@ -90,6 +105,19 @@ export default function ProfessorLive() {
   const [staleError, setStaleError] = useState('')
   const autoEndTriggeredRef = useRef(false)
 
+  // A not_started session whose window (start_time through end_time + grace) has fully
+  // closed today with zero real attendance — same rule the calendar uses, computed
+  // independently here since this page needs to branch its own render on it, not just color
+  // a card. Clickability into this page never changes; only what's shown once you're on it.
+  const grace = effectiveGraceMinutes(professorGrace, course)
+  const isAttendanceMissed =
+    session != null &&
+    session.status === 'not_started' &&
+    resolveTodayPastState(
+      sessionTimeState(session, todayString, nowTimeString, grace.before, grace.after),
+      hasAnyAttendance,
+    ) === 'attendance-missed'
+
   useEffect(() => {
     async function loadSession() {
       setLoading(true)
@@ -98,7 +126,7 @@ export default function ProfessorLive() {
       const { data: sessionRow, error: sessionError } = await supabase
         .from('sessions')
         .select(
-          'id, course_id, session_number, session_date, status, qr_duration_seconds, timing_config, mid_class_enabled, current_phase, mid_class_window_expires_at, qr_started_at',
+          'id, course_id, session_number, session_date, status, start_time, end_time, qr_duration_seconds, timing_config, mid_class_enabled, current_phase, mid_class_window_expires_at, qr_started_at',
         )
         .eq('id', sessionId)
         .maybeSingle()
@@ -111,7 +139,7 @@ export default function ProfessorLive() {
 
       const { data: courseRow, error: courseError } = await supabase
         .from('courses')
-        .select('id, name, default_qr_duration_seconds')
+        .select('id, name, default_qr_duration_seconds, grace_period_before_minutes, grace_period_after_minutes')
         .eq('id', sessionRow.course_id)
         .maybeSingle()
 
@@ -121,8 +149,16 @@ export default function ProfessorLive() {
         return
       }
 
+      // Only relevant for a not_started session — needed to tell "attendance missed" (zero
+      // records) apart from a session that was properly run, purely by real/date time.
+      const { count: attendanceCount } = await supabase
+        .from('attendance_records')
+        .select('*', { count: 'exact', head: true })
+        .eq('session_id', sessionRow.id)
+
       setCourse(courseRow)
       setSession(sessionRow)
+      setHasAnyAttendance((attendanceCount ?? 0) > 0)
       setDurationInput(String(sessionRow.qr_duration_seconds ?? courseRow.default_qr_duration_seconds))
       setTimingConfig(sessionRow.timing_config ?? 'start')
       setMidClassEnabled(sessionRow.mid_class_enabled ?? false)
@@ -131,6 +167,26 @@ export default function ProfessorLive() {
 
     loadSession()
   }, [sessionId])
+
+  // This professor's own global grace-period setting — same RPC bridge Professor.jsx uses,
+  // since the users table blocks anon SELECT entirely.
+  useEffect(() => {
+    async function loadGrace() {
+      const { data } = await supabase.rpc('get_professor_grace_period', { p_user_id: user.user_id })
+      if (data?.[0]) setProfessorGrace(data[0])
+    }
+    loadGrace()
+  }, [user.user_id])
+
+  // Refreshed periodically so a session sitting open on this page genuinely flips into (and
+  // out of) "attendance missed" as real time passes, not just once at page load.
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setTodayString(getTodayISTDateString())
+      setNowTimeString(getNowISTTimeString())
+    }, 30000)
+    return () => clearInterval(interval)
+  }, [])
 
   useEffect(() => {
     if (session?.status !== 'qr_live') return
@@ -229,7 +285,9 @@ export default function ProfessorLive() {
   }
 
   useEffect(() => {
-    if (session?.status !== 'qr_live' && session?.status !== 'manual_only') return
+    const needsAttendanceFeed =
+      session?.status === 'qr_live' || session?.status === 'manual_only' || isAttendanceMissed
+    if (!needsAttendanceFeed) return
 
     refreshAttendance()
 
@@ -253,7 +311,7 @@ export default function ProfessorLive() {
     return () => {
       supabase.removeChannel(channel)
     }
-  }, [session?.status, session?.id])
+  }, [session?.status, session?.id, isAttendanceMissed])
 
   // Stale-session watchdog — see the STALE_* constants above for the architectural caveat.
   // qr_started_at is stamped whenever a phase actually goes live (goLive) and is left
@@ -639,7 +697,19 @@ export default function ProfessorLive() {
           )}
         </div>
 
-        {session.status === 'not_started' && (
+        {session.status === 'not_started' && isAttendanceMissed && (
+          <div className="mt-10 flex flex-col items-center gap-3 py-8 text-center">
+            <span className="rounded-full bg-red-100 px-3 py-1 text-xs font-semibold tracking-wide text-red-700 uppercase">
+              Attendance Missed
+            </span>
+            <p className="max-w-sm text-sm text-gray-500">
+              This session's window, including its grace period, has closed with no attendance
+              taken. Upload a CSV backfill below, or use Manual Override to add students by hand.
+            </p>
+          </div>
+        )}
+
+        {session.status === 'not_started' && !isAttendanceMissed && (
           <div className="mt-10 flex flex-col items-center gap-5 py-8 text-center">
             <p className="text-gray-500">This session hasn't started yet.</p>
 
@@ -815,7 +885,11 @@ export default function ProfessorLive() {
         {session.status === 'ended' && <p className="mt-10 text-gray-500">Session ended.</p>}
       </Card>
 
-      {(session.status === 'qr_live' || session.status === 'manual_only') && (
+      <div className="mt-6">
+        <CsvBackfillUpload sessionId={session.id} courseId={course.id} onUploaded={refreshAttendance} />
+      </div>
+
+      {(session.status === 'qr_live' || session.status === 'manual_only' || isAttendanceMissed) && (
         <ManualOverrideCard
           sessionId={session.id}
           phase={session.current_phase ?? 'start'}

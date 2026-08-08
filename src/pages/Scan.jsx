@@ -61,7 +61,7 @@ export default function Scan() {
       const { data: session, error: sessionError } = await supabase
         .from('sessions')
         .select(
-          'id, session_number, current_token, reference_lat, reference_lng, status, mid_class_window_expires_at',
+          'id, course_id, session_number, current_token, reference_lat, reference_lng, status, mid_class_window_expires_at',
         )
         .eq('id', sessionId)
         .maybeSingle()
@@ -83,6 +83,29 @@ export default function Scan() {
       if (token !== session.current_token) {
         setPhase('expired')
         setMessage('This QR code has expired — scan the current one on screen.')
+        return
+      }
+
+      // Must happen before the already-marked check and before any GPS/device-fingerprint
+      // logic — a student who isn't enrolled in this course should see a clear enrollment
+      // error, never a confusing "already marked" or GPS-related message, and should never
+      // reach the device lock or attendance insert below.
+      const { data: enrollment, error: enrollmentError } = await supabase
+        .from('enrollments')
+        .select('id')
+        .eq('student_pgp_id', user.student_pgp_id)
+        .eq('course_id', session.course_id)
+        .maybeSingle()
+
+      if (enrollmentError) {
+        setPhase('error')
+        setMessage(enrollmentError.message)
+        return
+      }
+
+      if (!enrollment) {
+        setPhase('not-enrolled')
+        setMessage("You're not enrolled in this course.")
         return
       }
 
@@ -259,6 +282,9 @@ export default function Scan() {
 
         {phase === 'expired' && <StatusBlock tone="warning" title="QR code expired" message={message} />}
         {phase === 'closed' && <StatusBlock tone="warning" title="Attendance closed" message={message} />}
+        {phase === 'not-enrolled' && (
+          <StatusBlock tone="error" title="Not enrolled" message={message} />
+        )}
         {phase === 'device-used' && (
           <StatusBlock tone="error" title="Device already used" message={message} />
         )}

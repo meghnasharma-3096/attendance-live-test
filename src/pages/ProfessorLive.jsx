@@ -9,6 +9,7 @@ import { courseShortCode, downloadCsv, rowsToCsv } from '../lib/csv.js'
 import { effectiveGraceMinutes, resolveTodayPastState, sessionTimeState } from '../lib/sessionGrace.js'
 import UserMenu from '../components/UserMenu.jsx'
 import CsvBackfillUpload from '../components/CsvBackfillUpload.jsx'
+import LiveRoster from '../components/LiveRoster.jsx'
 
 const TIMING_OPTIONS = [
   { value: 'start', label: 'Start of class' },
@@ -94,7 +95,6 @@ export default function ProfessorLive() {
   const [token, setToken] = useState('')
   const [countdown, setCountdown] = useState(0)
   const [isReverification, setIsReverification] = useState(false)
-  const [presentCount, setPresentCount] = useState(0)
   const [manuallyMarked, setManuallyMarked] = useState([])
   const [exporting, setExporting] = useState(false)
   const [exportError, setExportError] = useState('')
@@ -264,14 +264,6 @@ export default function ProfessorLive() {
 
   async function refreshAttendance() {
     const phase = session.current_phase ?? 'start'
-
-    const { count, error: countError } = await supabase
-      .from('attendance_records')
-      .select('*', { count: 'exact', head: true })
-      .eq('session_id', session.id)
-      .eq('phase', phase)
-
-    if (!countError) setPresentCount(count ?? 0)
 
     const { data: manualData, error: manualError } = await supabase
       .from('attendance_records')
@@ -861,11 +853,6 @@ export default function ProfessorLive() {
               </div>
             )}
 
-            <div className="w-full rounded-xl bg-maroon-50 px-6 py-10 text-center">
-              <p className="text-8xl font-bold tabular-nums text-gray-900">{presentCount}</p>
-              <p className="mt-2 text-xl font-medium text-gray-600">students marked present</p>
-            </div>
-
             <button
               type="button"
               onClick={handleEndSession}
@@ -884,6 +871,17 @@ export default function ProfessorLive() {
 
         {session.status === 'ended' && <p className="mt-10 text-gray-500">Session ended.</p>}
       </Card>
+
+      {(session.status === 'qr_live' || session.status === 'manual_only' || session.status === 'ended') && (
+        <div className="mt-6">
+          <LiveRoster
+            sessionId={session.id}
+            courseId={course.id}
+            phase={session.current_phase ?? 'start'}
+            editable={session.status === 'ended'}
+          />
+        </div>
+      )}
 
       <div className="mt-6">
         <CsvBackfillUpload sessionId={session.id} courseId={course.id} onUploaded={refreshAttendance} />

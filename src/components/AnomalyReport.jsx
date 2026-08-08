@@ -45,6 +45,7 @@ export default function AnomalyReport({ courses, courseIds, scopeLabel }) {
   const [resolvingAppealId, setResolvingAppealId] = useState(null)
   const [appealActionError, setAppealActionError] = useState('')
   const [sameTimeAcrossCourses, setSameTimeAcrossCourses] = useState([])
+  const [reversedAttendance, setReversedAttendance] = useState([])
 
   async function runCheck() {
     setRunning(true)
@@ -56,6 +57,7 @@ export default function AnomalyReport({ courses, courseIds, scopeLabel }) {
       setUnverifiedMidClass([])
       setPendingAppeals([])
       setSameTimeAcrossCourses([])
+      setReversedAttendance([])
       setHasRun(true)
       setRunning(false)
       return
@@ -304,6 +306,35 @@ export default function AnomalyReport({ courses, courseIds, scopeLabel }) {
 
     overlaps.sort((x, y) => x.gapMinutes - y.gapMinutes)
     setSameTimeAcrossCourses(overlaps)
+
+    const { data: reversalRows, error: reversalError } = await fetchAllRows(() => {
+      let q = supabase
+        .from('attendance_reversals')
+        .select(
+          'id, student_pgp_id, original_method, reversed_at, students(name), sessions!inner(session_number, course_id, courses(name))',
+        )
+        .order('reversed_at', { ascending: false })
+      if (courseIds !== null) q = q.in('sessions.course_id', courseIds)
+      return q
+    })
+
+    if (reversalError) {
+      setRunning(false)
+      setError(reversalError.message)
+      return
+    }
+
+    setReversedAttendance(
+      (reversalRows ?? []).map((row) => ({
+        id: row.id,
+        pgpId: row.student_pgp_id,
+        name: row.students?.name ?? row.student_pgp_id,
+        originalMethod: row.original_method,
+        reversedAt: row.reversed_at,
+        sessionNumber: row.sessions?.session_number,
+        context: row.sessions ? courseSectionLabel(row.sessions.courses?.name) : null,
+      })),
+    )
 
     setHasRun(true)
     setRunning(false)
@@ -594,6 +625,49 @@ export default function AnomalyReport({ courses, courseIds, scopeLabel }) {
               Marked present via QR scan in two different courses on the same day within{' '}
               {OVERLAP_WINDOW_MINUTES} minutes — a real person cannot physically be in two classrooms at
               once. Manual entries are excluded, since they aren't device/location-verified anyway.
+            </p>
+          </div>
+
+          <div className="mt-6">
+            <h3 className="text-sm font-semibold text-gray-900">Attendance Manually Reversed by Professor</h3>
+            {reversedAttendance.length === 0 ? (
+              <EmptyState />
+            ) : (
+              <div className="mt-3 overflow-hidden rounded-xl border-l-4 border-red-400 bg-white shadow-sm">
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-sm">
+                    <thead>
+                      <tr className="border-b border-gray-100 text-xs font-medium tracking-wide text-gray-500 uppercase">
+                        <th className="px-6 py-3">Student</th>
+                        <th className="px-6 py-3">PGP ID</th>
+                        {showContext && <th className="px-6 py-3">Course</th>}
+                        <th className="px-6 py-3">Session</th>
+                        <th className="px-6 py-3">Original Method</th>
+                        <th className="px-6 py-3">Reversed At</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {reversedAttendance.map((row, i) => (
+                        <tr key={row.id} className={i % 2 === 0 ? 'bg-white' : 'bg-red-50/40'}>
+                          <td className="px-6 py-3 font-medium text-gray-900">{row.name}</td>
+                          <td className="px-6 py-3 text-gray-600">{row.pgpId}</td>
+                          {showContext && <td className="px-6 py-3 text-gray-600">{row.context ?? '—'}</td>}
+                          <td className="px-6 py-3 text-gray-600">
+                            {row.sessionNumber != null ? `Session ${row.sessionNumber}` : '—'}
+                          </td>
+                          <td className="px-6 py-3 text-gray-600">{row.originalMethod}</td>
+                          <td className="px-6 py-3 text-gray-600">{formatDateTimeIST(row.reversedAt)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+            <p className="mt-2 text-xs text-gray-400">
+              A professor unchecked a genuinely QR-scanned attendance record after the session ended —
+              real, device/location-verified evidence being overturned by hand, unlike a manual entry
+              being undone (which leaves no trail).
             </p>
           </div>
         </>

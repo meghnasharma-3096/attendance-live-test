@@ -109,21 +109,6 @@ function getNowISTTimeString() {
   return new Date().toLocaleTimeString('en-GB', { timeZone: 'Asia/Kolkata', hour12: false })
 }
 
-// TEMPORARY — remove before final deploy. Testing-only simulated "now" for the calendar's own
-// color/clickability logic ONLY (the two functions just below it) — never used anywhere that
-// writes real data (the reschedule form, the stale-session watchdog, attendance timestamps all
-// live outside this file and use the real clock untouched).
-const TESTING_SIMULATED_NOW = new Date('2026-08-08T08:47:00+05:30')
-
-// TEMPORARY — remove along with TESTING_SIMULATED_NOW above; restore the two call sites below
-// to getTodayISTDateString() / getNowISTTimeString() directly.
-function calendarTodayISTDateString() {
-  return TESTING_SIMULATED_NOW.toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' })
-}
-function calendarNowISTTimeString() {
-  return TESTING_SIMULATED_NOW.toLocaleTimeString('en-GB', { timeZone: 'Asia/Kolkata', hour12: false })
-}
-
 // Five real-world states, purely by date/time — not by status:
 //   grey       — a future date (not today)
 //   light      — today, before start_time
@@ -221,11 +206,8 @@ function demoAttendanceCounts(date, section) {
 export default function Professor() {
   const navigate = useNavigate()
   const { user } = useAuth()
-  // TEMPORARY: calendarTodayISTDateString()/calendarNowISTTimeString() below use
-  // TESTING_SIMULATED_NOW — restore to getTodayISTDateString()/getNowISTTimeString() when
-  // removing the override.
-  const [todayString, setTodayString] = useState(calendarTodayISTDateString())
-  const [nowTimeString, setNowTimeString] = useState(calendarNowISTTimeString())
+  const [todayString, setTodayString] = useState(getTodayISTDateString())
+  const [nowTimeString, setNowTimeString] = useState(getNowISTTimeString())
   const todayDate = new Date(`${todayString}T00:00:00Z`)
 
   const [viewedYear, setViewedYear] = useState(todayDate.getUTCFullYear())
@@ -244,11 +226,9 @@ export default function Professor() {
   // Refreshed periodically so "ongoing right now" genuinely activates/deactivates live, not
   // just once at page load.
   useEffect(() => {
-    // TEMPORARY: restore to getTodayISTDateString()/getNowISTTimeString() when removing
-    // TESTING_SIMULATED_NOW.
     const interval = setInterval(() => {
-      setTodayString(calendarTodayISTDateString())
-      setNowTimeString(calendarNowISTTimeString())
+      setTodayString(getTodayISTDateString())
+      setNowTimeString(getNowISTTimeString())
     }, 30000)
     return () => clearInterval(interval)
   }, [])
